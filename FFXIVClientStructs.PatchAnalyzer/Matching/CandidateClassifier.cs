@@ -36,7 +36,7 @@ public static class CandidateClassifier {
         var synthesizer = new SignatureSynthesizer(functionIndex, decoder);
         var proposal = synthesizer.Synthesize(image, recoveredTarget, null) ??
             analysis.RecoveryEvidence
-                .Where(evidence => evidence.CurrentTarget == recoveredTarget && evidence.CurrentCallSite is not null)
+                .Where(evidence => evidence.Accepted && evidence.CurrentTarget == recoveredTarget && evidence.CurrentCallSite is not null)
                 .Select(evidence => evidence.CurrentCallSite!.Value)
                 .Distinct()
                 .OrderBy(callSite => callSite.Value)

@@ -61,6 +61,8 @@ public class CallerRecoveryMatcherTests {
             TestRecovery.StructuralCallerMatches(0x1200, 0x2200, 0x1300, 0x2300));
 
         Assert.Equal(SymbolStatus.Ambiguous, result.Status);
+        Assert.Equal(2, result.RecoveryEvidence.Length);
+        Assert.All(result.RecoveryEvidence, evidence => Assert.True(evidence.Accepted));
     }
 
     [Fact]
@@ -72,6 +74,10 @@ public class CallerRecoveryMatcherTests {
             TestRecovery.NonUniqueStructuralCallerMatch(0x1200, 0x2200, 0x2300));
 
         Assert.Equal(SymbolStatus.Ambiguous, result.Status);
+        var evidence = Assert.Single(result.RecoveryEvidence);
+        Assert.False(evidence.Accepted);
+        Assert.Equal(2, evidence.ConsideredCandidates.Length);
+        Assert.All(evidence.ConsideredCandidates, candidate => Assert.NotNull(candidate.RejectionReason));
     }
 
     [Fact]

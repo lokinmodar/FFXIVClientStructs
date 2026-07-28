@@ -94,8 +94,7 @@ public static class CandidateYamlWriter {
                 throw new InvalidOperationException($"Cannot replace '{symbol.GeneratedName}' because its data source location is ambiguous.");
 
             var location = locations[0];
-            var imageBase = location.PreferredVa.Value - location.Rva.Value;
-            var currentAddress = checked(imageBase + symbol.CurrentTarget.Value.Value);
+            var currentAddress = checked(result.CurrentImageBase + symbol.CurrentTarget.Value.Value);
             replacements.Add(Replacement.FromSource(source, location.SourceSpan, $"0x{currentAddress:X}"));
         }
 

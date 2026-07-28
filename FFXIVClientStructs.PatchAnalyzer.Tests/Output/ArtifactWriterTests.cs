@@ -24,6 +24,20 @@ public class ArtifactWriterTests {
     }
 
     [Fact]
+    public void Report_SortsRecoveryEvidenceAndConsideredCandidates() {
+        var result = TestResults.WithRecoveryEvidence([
+            TestResults.Evidence(previousCallSite: 0x1200, currentCallSite: 0x2200, currentTarget: 0x2800),
+            TestResults.Evidence(previousCallSite: 0x1100, currentCallSite: 0x2100, currentTarget: 0x2700)
+        ]);
+
+        var report = AnalysisReport.Create(result);
+
+        var evidence = Assert.Single(report.Symbols).RecoveryEvidence;
+        Assert.Equal(new uint?[] { 0x1100, 0x1200 }, evidence.Select(item => item.PreviousCallSiteRva));
+        Assert.Equal(new uint?[] { 0x2710, 0x2720 }, evidence[0].ConsideredCandidates.Select(item => item.CurrentTargetRva));
+    }
+
+    [Fact]
     public void CandidateYaml_ReplacesOnlyAcceptedSpansAndPreservesText() {
         const string source = """
                               version: old # keep
@@ -232,8 +246,11 @@ public class ArtifactWriterTests {
 
         public static PatchAnalysisResult WithVersionOverride(string source, string version) => new(
             "succeeded",
+            "1.0.0",
+            "0123456789ABCDEF",
             Identity("previous.exe", "old"),
             Identity("current.exe", "new"),
+            ImageBase,
             new AnalysisConfiguration(10, 96, 8, null, version),
             DataCatalog.Parse(source, ImageBase),
             ImmutableArray<SymbolAnalysis>.Empty,
@@ -244,13 +261,40 @@ public class ArtifactWriterTests {
 
         public static PatchAnalysisResult WithCatalog(DataCatalog catalog, SymbolAnalysis[] analyses) => new(
             "succeeded",
+            "1.0.0",
+            "0123456789ABCDEF",
             Identity("previous.exe", "old"),
             new BinaryIdentity("current.exe", 123, new string('A', 64), null, "none"),
+            ImageBase,
             new AnalysisConfiguration(10, 96, 8, null, null),
             catalog,
             analyses.ToImmutableArray(),
             new AnalysisMetrics(ImmutableSortedDictionary<string, long>.Empty),
             ImmutableSortedDictionary<string, long>.Empty);
+
+        public static PatchAnalysisResult WithRecoveryEvidence(RecoveryEvidence[] evidence) {
+            var result = WithMetrics();
+            return result with {
+                Symbols = [result.Symbols[0] with { RecoveryEvidence = [.. evidence] }]
+            };
+        }
+
+        public static RecoveryEvidence Evidence(uint previousCallSite, uint currentCallSite, uint currentTarget) => new(
+            "StructuralCaller",
+            true,
+            new Rva(0x1500),
+            new Rva(currentTarget),
+            new Rva(previousCallSite - 0x10),
+            new Rva(previousCallSite),
+            new Rva(currentCallSite - 0x10),
+            new Rva(currentCallSite),
+            "FINGERPRINT",
+            ["second", "first"],
+            [
+                new RecoveryCandidateEvidence(new Rva(currentTarget + 0x20), null, null, false, 2, "SECOND", "rejected second"),
+                new RecoveryCandidateEvidence(new Rva(currentTarget + 0x10), null, null, false, 1, "FIRST", "rejected first")
+            ],
+            null);
 
         public static DataCatalog CatalogWithLocations(string source, DataLocation[] locations) {
             var constructor = typeof(DataCatalog).GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, null, [typeof(string), typeof(string), typeof(SourceSpan), typeof(ImmutableArray<DataLocation>), typeof(ImmutableHashSet<string>)], null)!;
@@ -259,8 +303,11 @@ public class ArtifactWriterTests {
 
         private static PatchAnalysisResult Create(string source, SymbolAnalysis[] analyses, params (string Stage, long Milliseconds)[] metrics) => new(
             "succeeded",
+            "1.0.0",
+            "0123456789ABCDEF",
             Identity("previous.exe", "old"),
             Identity("current.exe", "new"),
+            ImageBase,
             new AnalysisConfiguration(10, 96, 8, null, null),
             DataCatalog.Parse(source, ImageBase),
             analyses.ToImmutableArray(),

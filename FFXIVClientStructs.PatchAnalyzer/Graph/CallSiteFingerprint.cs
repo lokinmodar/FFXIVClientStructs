@@ -10,6 +10,7 @@ namespace FFXIVClientStructs.PatchAnalyzer.Graph;
 public sealed record CallSiteFingerprint(
     string Sha256,
     ImmutableArray<string> OpcodeKeys,
+    ImmutableArray<string> CanonicalInputs,
     int InstructionCount) {
     /// <summary>Defines the required count of decoded instructions on each side of a call-site.</summary>
     public const int InstructionRadius = 4;
@@ -24,11 +25,13 @@ public sealed record CallSiteFingerprint(
 
         var window = instructions.ToImmutableArray();
         var opcodeKeys = window.Select(instruction => instruction.OpcodeKey).ToImmutableArray();
-        var canonical = string.Join("\n", window.Select(instruction =>
-            $"{instruction.OpcodeKey}|{Convert.ToHexString(NormalizeBytes(instruction, imageSize, imageBase))}"));
+        var canonicalInputs = window.Select(instruction =>
+            $"{instruction.OpcodeKey}|{Convert.ToHexString(NormalizeBytes(instruction, imageSize, imageBase))}").ToImmutableArray();
+        var canonical = string.Join("\n", canonicalInputs);
         return new CallSiteFingerprint(
             Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(canonical))),
             opcodeKeys,
+            canonicalInputs,
             window.Length);
     }
 

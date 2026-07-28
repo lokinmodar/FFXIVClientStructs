@@ -33,7 +33,10 @@ public class PatchAnalyzerApplicationTests {
 
         var result = await RunSucceededAsync(fixture);
 
-        AssertStatus(result, "FFXIVClientStructs.FFXIV.Test.Structural", SymbolStatus.StructuralRecovered);
+        var symbol = AssertStatus(result, "FFXIVClientStructs.FFXIV.Test.Structural", SymbolStatus.StructuralRecovered);
+        var evidence = Assert.Single(symbol.RecoveryEvidence);
+        Assert.NotEmpty(evidence.FingerprintInputs);
+        Assert.Contains(evidence.ConsideredCandidates, candidate => candidate.RejectionReason is not null);
     }
 
     [Fact]
@@ -114,6 +117,44 @@ public class PatchAnalyzerApplicationTests {
         Assert.Contains(unchanged, candidate, StringComparison.Ordinal);
         Assert.True(
             candidate.IndexOf("0x140001020: Test::Symbol # retained function comment", StringComparison.Ordinal) < candidate.IndexOf(unchanged, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task RunAsync_DifferentCurrentImageBase_UsesCurrentPreferredVaInCandidateYaml() {
+        using var fixture = TestPatchPair.DirectUnique(currentImageBase: 0x150000000);
+
+        await RunSucceededAsync(fixture);
+
+        var candidate = File.ReadAllText(fixture.CandidateYamlPath);
+        Assert.Contains("0x150001020: Test::Symbol", candidate, StringComparison.Ordinal);
+        Assert.DoesNotContain("0x140001020: Test::Symbol", candidate, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunAsync_ThirtyThreeCurrentMatches_RetainsThirtyTwoAndReportsTruncation() {
+        using var fixture = TestPatchPair.ThirtyThreeCurrentMatches();
+
+        var result = await RunSucceededAsync(fixture);
+
+        var symbol = AssertStatus(result, "FFXIVClientStructs.FFXIV.Test.Capped", SymbolStatus.Ambiguous);
+        Assert.Equal(32, result.Configuration.MatchLimit);
+        Assert.Equal(32, symbol.CurrentScan.Matches.Length);
+        Assert.True(symbol.CurrentScan.Truncated);
+    }
+
+    [Fact]
+    public async Task RunAsync_ReportContainsRequiredMetadataAndWorkloadCounts() {
+        using var fixture = TestPatchPair.DirectUnique();
+
+        var result = await RunSucceededAsync(fixture);
+
+        Assert.False(string.IsNullOrWhiteSpace(result.ToolVersion));
+        Assert.False(string.IsNullOrWhiteSpace(result.RepositoryVersion));
+        Assert.Equal(0x140001000ul, Assert.Single(result.Symbols).PreviousDataPreferredVa);
+        Assert.Equal(0x40, result.WorkloadCounts["previous_executable_bytes"]);
+        Assert.Equal(0x40, result.WorkloadCounts["current_executable_bytes"]);
+        Assert.Equal(0, result.WorkloadCounts["previous_instructions"]);
+        Assert.Equal(0, result.WorkloadCounts["current_instructions"]);
     }
 
     [Fact]
@@ -229,12 +270,13 @@ public class PatchAnalyzerApplicationTests {
 
         public static TestPatchPair SameExecutable() => Create([0x40, 0x53, 0xC3], [0x40, 0x53, 0xC3], [Signature("Symbol", "40 53")], Yaml((0x1000, "Test::Symbol")));
 
-        public static TestPatchPair DirectUnique(IInstructionDecoder? decoder = null, string? source = null) => Create(
+        public static TestPatchPair DirectUnique(IInstructionDecoder? decoder = null, string? source = null, ulong currentImageBase = ImageBase) => Create(
             Bytes(0x40, (0, [0x40, 0x53, 0xC3])),
             Bytes(0x40, (0x20, [0x40, 0x53, 0xC3])),
             [Signature("Symbol", "40 53")],
             source ?? Yaml((0x1000, "Test::Symbol")),
-            decoder: decoder);
+            decoder: decoder,
+            currentImageBase: currentImageBase);
 
         public static TestPatchPair StructuralRecovered() {
             var previous = Bytes(0x300);
@@ -243,8 +285,22 @@ public class PatchAnalyzerApplicationTests {
             previous[5] = 0xC3;
             WriteCall(current, 0x80, 0x1080, 0x1150);
             current[0x85] = 0xC3;
+            current[0x180] = 0xC3;
             return Create(previous, current, [Signature("Structural", Pattern(previous, 0, 5))], Yaml((0x1000, "Test::Structural")),
-                [new RuntimeFunctionSpec(0x1000, 0x1006, 0)], [new RuntimeFunctionSpec(0x1080, 0x1086, 0)]);
+                [new RuntimeFunctionSpec(0x1000, 0x1006, 0)],
+                [new RuntimeFunctionSpec(0x1080, 0x1086, 0), new RuntimeFunctionSpec(0x1180, 0x1181, 0)]);
+        }
+
+        public static TestPatchPair ThirtyThreeCurrentMatches() {
+            var current = Bytes(0x100);
+            for (var index = 0; index < 33; index++)
+                Place(current, checked((uint)(0x1000 + index * 3)), [0x40, 0x53, 0xC3]);
+
+            return Create(
+                Bytes(0x10, (0, [0x40, 0x53, 0xC3])),
+                current,
+                [Signature("Capped", "40 53")],
+                Yaml((0x1000, "Test::Capped")));
         }
 
         public static TestPatchPair CallerRecovered() {
@@ -338,15 +394,17 @@ public class PatchAnalyzerApplicationTests {
             string source,
             RuntimeFunctionSpec[]? previousFunctions = null,
             RuntimeFunctionSpec[]? currentFunctions = null,
-            IInstructionDecoder? decoder = null) {
+            IInstructionDecoder? decoder = null,
+            ulong previousImageBase = ImageBase,
+            ulong currentImageBase = ImageBase) {
             var root = Path.Combine(Path.GetTempPath(), $"FFXIVClientStructs.PatchAnalyzer.Tests.{Guid.NewGuid():N}");
             Directory.CreateDirectory(root);
             var previousExecutable = Path.Combine(root, "previous.exe");
             var currentExecutable = Path.Combine(root, "current.exe");
             var dataFile = Path.Combine(root, "data.yml");
             var outputDirectory = Path.Combine(root, "output");
-            var previousBuilder = SyntheticPeBuilder.Create().WithSection(".text", 0x1000, previousText, executable: true);
-            var currentBuilder = SyntheticPeBuilder.Create().WithSection(".text", 0x1000, currentText, executable: true);
+            var previousBuilder = SyntheticPeBuilder.Create().WithImageBase(previousImageBase).WithSection(".text", 0x1000, previousText, executable: true);
+            var currentBuilder = SyntheticPeBuilder.Create().WithImageBase(currentImageBase).WithSection(".text", 0x1000, currentText, executable: true);
             if (previousFunctions is { Length: > 0 })
                 previousBuilder.WithRuntimeFunctions(previousFunctions);
             if (currentFunctions is { Length: > 0 })

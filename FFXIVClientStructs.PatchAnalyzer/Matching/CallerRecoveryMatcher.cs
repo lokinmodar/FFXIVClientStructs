@@ -96,17 +96,32 @@ public static class CallerRecoveryMatcher {
         foreach (var edge in incoming) {
             var previousFunction = FindFunction(previous, edge.SourceFunction);
             if (previousFunction is null || previousFunction.IsSuspect) {
+                evidence.Add(RejectedAnchor(
+                    "UnsupportedCaller",
+                    previousTarget,
+                    edge.SourceFunction,
+                    edge.CallSite,
+                    null,
+                    "The previous caller graph is missing or suspect."));
                 hasUnsupportedCaller = true;
                 continue;
             }
 
             if (!TryMapCaller(edge.SourceFunction, context, out var currentCaller, out var anchorKind, out var isFuzzy)) {
+                evidence.Add(RejectedCallerMapping(previousTarget, edge, context, isFuzzy));
                 hasNonAcceptingCallerMapping |= isFuzzy;
                 continue;
             }
 
             var currentFunction = FindFunction(current, currentCaller);
             if (currentFunction is null || currentFunction.IsSuspect) {
+                evidence.Add(RejectedAnchor(
+                    anchorKind,
+                    previousTarget,
+                    edge.SourceFunction,
+                    edge.CallSite,
+                    currentCaller,
+                    "The mapped current caller graph is missing or suspect."));
                 hasUnsupportedCaller = true;
                 continue;
             }
@@ -117,18 +132,58 @@ public static class CallerRecoveryMatcher {
                 context.CallSiteInstructionRadius,
                 checked((uint)context.PreviousImage.SizeOfImage),
                 context.PreviousImage.ImageBase);
-            var matchingEdges = current.DirectCalls
+            var consideredEdges = current.DirectCalls
                 .Where(candidate => candidate.SourceFunction == currentCaller)
                 .Where(candidate => candidate.Kind == edge.Kind)
-                .Where(candidate => CallSiteFingerprint.Create(
+                .Select(candidate => new {
+                    Edge = candidate,
+                    Fingerprint = CallSiteFingerprint.Create(
                     currentFunction,
                     candidate.CallSite,
                     context.CallSiteInstructionRadius,
                     checked((uint)context.CurrentImage.SizeOfImage),
-                    context.CurrentImage.ImageBase).Sha256 == previousFingerprint.Sha256)
-                .OrderBy(candidate => candidate.CallSite.Value)
-                .ThenBy(candidate => candidate.Target.Value)
+                    context.CurrentImage.ImageBase)
+                })
+                .OrderBy(candidate => candidate.Edge.CallSite.Value)
+                .ThenBy(candidate => candidate.Edge.Target.Value)
                 .ToImmutableArray();
+            var matchingEdges = consideredEdges
+                .Where(candidate => candidate.Fingerprint.Sha256 == previousFingerprint.Sha256)
+                .ToImmutableArray();
+            var accepted = matchingEdges.Length == 1;
+            var candidateEvidence = consideredEdges
+                .Select((candidate, index) => new RecoveryCandidateEvidence(
+                    candidate.Edge.Target,
+                    candidate.Edge.SourceFunction,
+                    candidate.Edge.CallSite,
+                    candidate.Fingerprint.Sha256 == previousFingerprint.Sha256,
+                    index + 1,
+                    candidate.Fingerprint.Sha256,
+                    candidate.Fingerprint.Sha256 != previousFingerprint.Sha256
+                        ? "The normalized call-site fingerprint does not match."
+                        : accepted
+                            ? null
+                            : "The normalized call-site fingerprint is not unique."))
+                .ToImmutableArray();
+            var match = accepted ? matchingEdges[0].Edge : null;
+            var rejectionReason = accepted
+                ? null
+                : matchingEdges.IsEmpty
+                    ? "No equivalent current direct call-site was found."
+                    : "Multiple current call-sites have the same normalized fingerprint.";
+            evidence.Add(new RecoveryEvidence(
+                anchorKind,
+                accepted,
+                previousTarget,
+                match?.Target,
+                edge.SourceFunction,
+                edge.CallSite,
+                currentCaller,
+                match?.CallSite,
+                previousFingerprint.Sha256,
+                previousFingerprint.CanonicalInputs,
+                candidateEvidence,
+                rejectionReason));
 
             if (matchingEdges.IsEmpty) {
                 hasUnmatchedCurrentCall = true;
@@ -138,17 +193,6 @@ public static class CallerRecoveryMatcher {
                 hasCompetingCallSite = true;
                 continue;
             }
-
-            var match = matchingEdges[0];
-            evidence.Add(new RecoveryEvidence(
-                anchorKind,
-                previousTarget,
-                match.Target,
-                edge.SourceFunction,
-                edge.CallSite,
-                currentCaller,
-                match.CallSite,
-                previousFingerprint.Sha256));
         }
 
         var trustedSeed = TryRecoverTrustedSeed(directResult, previous, current, context, previousTarget);
@@ -160,13 +204,18 @@ public static class CallerRecoveryMatcher {
         hasCompetingCallSite |= trustedSeed.HasCompetingCallSite;
 
         if (hasCompetingCallSite || hasNonAcceptingCallerMapping)
-            return With(directResult, SymbolStatus.Ambiguous, null, [], hasNonAcceptingCallerMapping
+            return With(directResult, SymbolStatus.Ambiguous, null, evidence.ToImmutable(), hasNonAcceptingCallerMapping
                 ? "A caller does not have an exact unique structural mapping."
                 : "Multiple current call-sites have the same normalized fingerprint.");
 
-        var targets = evidence.Select(item => item.CurrentTarget).Distinct().OrderBy(target => target.Value).ToImmutableArray();
+        var targets = evidence
+            .Where(item => item.Accepted && item.CurrentTarget is not null)
+            .Select(item => item.CurrentTarget!.Value)
+            .Distinct()
+            .OrderBy(target => target.Value)
+            .ToImmutableArray();
         if (targets.Length > 1)
-            return With(directResult, SymbolStatus.Ambiguous, null, [], "Independent caller anchors resolve to different targets.");
+            return With(directResult, SymbolStatus.Ambiguous, null, evidence.ToImmutable(), "Independent caller anchors resolve to different targets.");
         if (targets.Length == 1)
             return CandidateClassifier.RevalidateRecovered(
                 With(directResult, SymbolStatus.CallerRecovered, targets[0], evidence.ToImmutable(), null),
@@ -174,11 +223,74 @@ public static class CallerRecoveryMatcher {
                 FunctionIndex.Build(context.CurrentImage),
                 context.Decoder);
         if (hasUnmatchedCurrentCall)
-            return With(directResult, SymbolStatus.PossibleInlining, null, [], "Previous direct callers have no equivalent current direct call-site.");
+            return With(directResult, SymbolStatus.PossibleInlining, null, evidence.ToImmutable(), "Previous direct callers have no equivalent current direct call-site.");
         if (hasUnsupportedCaller)
-            return With(directResult, SymbolStatus.Unsupported, null, [], "Only suspect or unsupported caller evidence is available.");
-        return directResult;
+            return With(directResult, SymbolStatus.Unsupported, null, evidence.ToImmutable(), "Only suspect or unsupported caller evidence is available.");
+        return evidence.Count == 0 ? directResult : directResult with { RecoveryEvidence = evidence.ToImmutable() };
     }
+
+    private static RecoveryEvidence RejectedCallerMapping(
+        Rva previousTarget,
+        CallEdge edge,
+        CallerRecoveryContext context,
+        bool isFuzzy) {
+        if (!context.FunctionMatches.TryGetValue(edge.SourceFunction, out var match))
+            return RejectedAnchor(
+                "UnmappedCaller",
+                previousTarget,
+                edge.SourceFunction,
+                edge.CallSite,
+                null,
+                "The previous caller has no current structural mapping.");
+
+        var candidates = match.Candidates
+            .OrderBy(candidate => candidate.Rank)
+            .ThenBy(candidate => candidate.CurrentTarget.Value)
+            .Select(candidate => new RecoveryCandidateEvidence(
+                null,
+                candidate.CurrentTarget,
+                null,
+                candidate.Exact,
+                candidate.Rank,
+                candidate.FingerprintSha256,
+                candidate.RejectionReason ?? "The candidate does not provide a unique exact caller mapping."))
+            .ToImmutableArray();
+        return new RecoveryEvidence(
+            "StructuralCaller",
+            false,
+            previousTarget,
+            null,
+            edge.SourceFunction,
+            edge.CallSite,
+            null,
+            null,
+            match.PreviousFingerprint.Sha256,
+            match.PreviousFingerprint.BasicBlockKeys,
+            candidates,
+            isFuzzy
+                ? "The caller structural mapping is ambiguous or fuzzy."
+                : "The caller has no accepted structural mapping.");
+    }
+
+    private static RecoveryEvidence RejectedAnchor(
+        string anchorKind,
+        Rva previousTarget,
+        Rva? previousCaller,
+        Rva? previousCallSite,
+        Rva? currentCaller,
+        string rejectionReason) => new(
+            anchorKind,
+            false,
+            previousTarget,
+            null,
+            previousCaller,
+            previousCallSite,
+            currentCaller,
+            null,
+            null,
+            [],
+            [],
+            rejectionReason);
 
     private static bool TryMapCaller(
         Rva previousCaller,
@@ -234,65 +346,144 @@ public static class CallerRecoveryMatcher {
 
         var previousCallSite = directResult.PreviousScan.Matches[0].PatternRva;
         var previousFunction = FindContainingFunction(previous, previousCallSite);
-        if (previousFunction is null || previousFunction.IsSuspect ||
-            previousFunction.Instructions.Any(instruction => instruction.Rva == previousCallSite))
+        if (previousFunction is null)
+            return default;
+        if (previousFunction.IsSuspect)
+            return new TrustedSeedResult(
+                RejectedAnchor("TrustedCallSite", previousTarget, previousFunction.Range.Begin, previousCallSite, null, "The previous enclosing function is suspect."),
+                false,
+                true,
+                false,
+                false);
+        if (previousFunction.Instructions.Any(instruction => instruction.Rva == previousCallSite))
             return default;
 
         if (!context.FunctionMatches.TryGetValue(previousFunction.Range.Begin, out var functionMatch))
-            return default;
+            return new TrustedSeedResult(
+                RejectedAnchor("TrustedCallSite", previousTarget, previousFunction.Range.Begin, previousCallSite, null, "The previous enclosing function has no current structural mapping."),
+                false,
+                true,
+                false,
+                false);
         if (functionMatch.Status != SymbolStatus.StructuralRecovered || functionMatch.CurrentTarget is not { } currentCaller) {
-            return functionMatch.Status == SymbolStatus.Ambiguous || functionMatch.Candidates.Any(candidate => !candidate.Exact)
-                ? new TrustedSeedResult(null, true, false, false, false)
-                : default;
+            var structuralCandidates = functionMatch.Candidates
+                .OrderBy(candidate => candidate.Rank)
+                .ThenBy(candidate => candidate.CurrentTarget.Value)
+                .Select(candidate => new RecoveryCandidateEvidence(
+                    null,
+                    candidate.CurrentTarget,
+                    null,
+                    candidate.Exact,
+                    candidate.Rank,
+                    candidate.FingerprintSha256,
+                    candidate.RejectionReason ?? "The candidate does not provide a unique exact enclosing-function mapping."))
+                .ToImmutableArray();
+            var rejected = new RecoveryEvidence(
+                "TrustedCallSite",
+                false,
+                previousTarget,
+                null,
+                previousFunction.Range.Begin,
+                previousCallSite,
+                null,
+                null,
+                functionMatch.PreviousFingerprint.Sha256,
+                functionMatch.PreviousFingerprint.BasicBlockKeys,
+                structuralCandidates,
+                "The enclosing function does not have an exact unique structural mapping.");
+            return new TrustedSeedResult(
+                rejected,
+                functionMatch.Status == SymbolStatus.Ambiguous || functionMatch.Candidates.Any(candidate => !candidate.Exact),
+                false,
+                false,
+                false);
         }
 
         var currentFunction = FindFunction(current, currentCaller);
         if (currentFunction is null || currentFunction.IsSuspect)
-            return new TrustedSeedResult(null, false, true, false, false);
+            return new TrustedSeedResult(
+                RejectedAnchor("TrustedCallSite", previousTarget, previousFunction.Range.Begin, previousCallSite, currentCaller, "The mapped current enclosing function is missing or suspect."),
+                false,
+                true,
+                false,
+                false);
         if (!TryDecodeCallSiteWindow(context.PreviousImage, context.Decoder, previousFunction.Range, previousCallSite, out var previousWindow) ||
             !IsDirectOpcode(previousWindow[CallSiteFingerprint.InstructionRadius]))
-            return new TrustedSeedResult(null, false, true, false, false);
+            return new TrustedSeedResult(
+                RejectedAnchor("TrustedCallSite", previousTarget, previousFunction.Range.Begin, previousCallSite, currentCaller, "The previous call-site does not have one valid bounded instruction window."),
+                false,
+                true,
+                false,
+                false);
 
         var previousFingerprint = CallSiteFingerprint.Create(
             previousWindow,
             checked((uint)context.PreviousImage.SizeOfImage),
             context.PreviousImage.ImageBase);
-        var candidates = ImmutableArray.CreateBuilder<(Rva Candidate, ImmutableArray<DecodedInstruction> Window)>();
+        var candidates = ImmutableArray.CreateBuilder<(Rva CallSite, Rva? Target, string? FingerprintSha256, bool Exact, string? RejectionReason)>();
         foreach (var candidate in FindDirectOpcodeCandidates(context.CurrentImage, currentFunction.Range)) {
             if (!TryDecodeCallSiteWindow(context.CurrentImage, context.Decoder, currentFunction.Range, candidate, out var window) ||
-                !IsDirectOpcode(window[CallSiteFingerprint.InstructionRadius]) ||
-                CallSiteFingerprint.Create(
-                    window,
-                    checked((uint)context.CurrentImage.SizeOfImage),
-                    context.CurrentImage.ImageBase).Sha256 != previousFingerprint.Sha256)
+                !IsDirectOpcode(window[CallSiteFingerprint.InstructionRadius])) {
+                candidates.Add((candidate, null, null, false, "The opcode candidate does not have one valid bounded direct-edge window."));
                 continue;
+            }
 
-            candidates.Add((candidate, window));
+            var currentFingerprint = CallSiteFingerprint.Create(
+                window,
+                checked((uint)context.CurrentImage.SizeOfImage),
+                context.CurrentImage.ImageBase);
+            var target = window[CallSiteFingerprint.InstructionRadius].NearBranchTarget;
+            var exact = currentFingerprint.Sha256 == previousFingerprint.Sha256;
+            candidates.Add((
+                candidate,
+                target,
+                currentFingerprint.Sha256,
+                exact,
+                exact ? null : "The normalized call-site fingerprint does not match."));
         }
 
         var matchingCandidates = candidates
-            .OrderBy(candidate => candidate.Candidate.Value)
+            .Where(candidate => candidate.Exact)
+            .OrderBy(candidate => candidate.CallSite.Value)
             .ToImmutableArray();
-
-        if (matchingCandidates.IsEmpty)
-            return new TrustedSeedResult(null, false, false, true, false);
-        if (matchingCandidates.Length != 1 || matchingCandidates[0].Window[CallSiteFingerprint.InstructionRadius].NearBranchTarget is not { } currentTarget)
-            return new TrustedSeedResult(null, false, false, false, true);
+        var accepted = matchingCandidates.Length == 1 && matchingCandidates[0].Target is not null;
+        var consideredCandidates = candidates
+            .OrderBy(candidate => candidate.CallSite.Value)
+            .Select((candidate, index) => new RecoveryCandidateEvidence(
+                candidate.Target,
+                currentCaller,
+                candidate.CallSite,
+                candidate.Exact,
+                index + 1,
+                candidate.FingerprintSha256,
+                candidate.Exact && !accepted
+                    ? "The normalized call-site fingerprint is not unique."
+                    : candidate.RejectionReason))
+            .ToImmutableArray();
+        var evidence = new RecoveryEvidence(
+            "TrustedCallSite",
+            accepted,
+            previousTarget,
+            accepted ? matchingCandidates[0].Target : null,
+            previousFunction.Range.Begin,
+            previousCallSite,
+            currentCaller,
+            accepted ? matchingCandidates[0].CallSite : null,
+            previousFingerprint.Sha256,
+            previousFingerprint.CanonicalInputs,
+            consideredCandidates,
+            accepted
+                ? null
+                : matchingCandidates.IsEmpty
+                    ? "No equivalent current direct-edge window was found."
+                    : "Multiple current direct-edge windows have the same normalized fingerprint.");
 
         return new TrustedSeedResult(
-            new RecoveryEvidence(
-                "TrustedCallSite",
-                previousTarget,
-                currentTarget,
-                previousFunction.Range.Begin,
-                previousCallSite,
-                currentCaller,
-                matchingCandidates[0].Candidate,
-                previousFingerprint.Sha256),
+            evidence,
             false,
             false,
-            false,
-            false);
+            matchingCandidates.IsEmpty,
+            matchingCandidates.Length > 1);
     }
 
     private static ImmutableArray<Rva> FindDirectOpcodeCandidates(PeImage image, RuntimeFunctionRange range) {

@@ -10,15 +10,28 @@ public enum SymbolStatus {
     PossibleInlining, NotInData, Unsupported, AnalysisError
 }
 
+public sealed record RecoveryCandidateEvidence(
+    Rva? CurrentTarget,
+    Rva? CurrentCaller,
+    Rva? CurrentCallSite,
+    bool Exact,
+    int Rank,
+    string? FingerprintSha256,
+    string? RejectionReason);
+
 public sealed record RecoveryEvidence(
     string AnchorKind,
+    bool Accepted,
     Rva PreviousTarget,
-    Rva CurrentTarget,
+    Rva? CurrentTarget,
     Rva? PreviousCaller,
     Rva? PreviousCallSite,
     Rva? CurrentCaller,
     Rva? CurrentCallSite,
-    string FingerprintSha256);
+    string? FingerprintSha256,
+    ImmutableArray<string> FingerprintInputs,
+    ImmutableArray<RecoveryCandidateEvidence> ConsideredCandidates,
+    string? RejectionReason);
 
 public sealed record SignatureProposal(
     string PatternText,

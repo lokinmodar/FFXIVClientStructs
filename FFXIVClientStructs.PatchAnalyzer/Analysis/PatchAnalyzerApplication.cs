@@ -13,8 +13,9 @@ namespace FFXIVClientStructs.PatchAnalyzer.Analysis;
 
 /// <summary>Coordinates patch analysis from validated inputs through deterministic artifacts.</summary>
 public sealed class PatchAnalyzerApplication {
-    private const int MatchLimit = 10;
+    private const int MatchLimit = 32;
     private const int MaximumSignatureBytes = 96;
+    private static readonly string ToolVersion = typeof(PatchAnalyzerApplication).Assembly.GetName().Version?.ToString() ?? "unknown";
 
     private readonly ISignatureInventory signatureInventory;
     private readonly IInstructionDecoder instructionDecoder;
@@ -240,13 +241,28 @@ public sealed class PatchAnalyzerApplication {
             CurrentTarget = currentTarget,
             RecoveryEvidence = [new RecoveryEvidence(
                 "StructuralFunction",
+                true,
                 previousTarget,
                 currentTarget,
                 null,
                 null,
                 null,
                 null,
-                match.PreviousFingerprint.Sha256)],
+                match.PreviousFingerprint.Sha256,
+                match.PreviousFingerprint.BasicBlockKeys,
+                match.Candidates
+                    .OrderBy(candidate => candidate.Rank)
+                    .ThenBy(candidate => candidate.CurrentTarget.Value)
+                    .Select(candidate => new RecoveryCandidateEvidence(
+                        candidate.CurrentTarget,
+                        null,
+                        null,
+                        candidate.Exact,
+                        candidate.Rank,
+                        candidate.FingerprintSha256,
+                        candidate.RejectionReason))
+                    .ToImmutableArray(),
+                null)],
             Diagnostics = analysis.Diagnostics
         };
         return CandidateClassifier.RevalidateRecovered(recovered, currentImage, currentFunctions, decoder);
@@ -352,19 +368,28 @@ public sealed class PatchAnalyzerApplication {
         CallGraph? previousGraph = null,
         CallGraph? currentGraph = null) => new(
             runStatus,
+            ToolVersion,
+            FFXIVClientStructs.ThisAssembly.Git.Sha,
             preflight.PreviousImage.Identity,
             preflight.CurrentImage.Identity,
+            preflight.CurrentImage.ImageBase,
             preflight.Configuration,
             preflight.Data,
             symbols,
             new AnalysisMetrics(stageMilliseconds.ToImmutableSortedDictionary(StringComparer.Ordinal)),
-            CreateWorkloadCounts(preflight.Signatures.Length, previousGraph, currentGraph));
+            CreateWorkloadCounts(preflight.Signatures.Length, preflight.PreviousImage, preflight.CurrentImage, previousGraph, currentGraph));
 
     private static ImmutableSortedDictionary<string, long> CreateWorkloadCounts(
         int signatureCount,
+        PeImage previousImage,
+        PeImage currentImage,
         CallGraph? previousGraph,
         CallGraph? currentGraph) => new Dictionary<string, long> {
             ["signatures"] = signatureCount,
+            ["previous_executable_bytes"] = previousImage.ExecutableSections.Sum(section => (long)section.Bytes.Length),
+            ["current_executable_bytes"] = currentImage.ExecutableSections.Sum(section => (long)section.Bytes.Length),
+            ["previous_instructions"] = previousGraph?.Functions.Sum(function => (long)function.Instructions.Length) ?? 0,
+            ["current_instructions"] = currentGraph?.Functions.Sum(function => (long)function.Instructions.Length) ?? 0,
             ["previous_functions"] = previousGraph?.Functions.Length ?? 0,
             ["current_functions"] = currentGraph?.Functions.Length ?? 0,
             ["previous_direct_calls"] = previousGraph?.DirectCalls.Length ?? 0,

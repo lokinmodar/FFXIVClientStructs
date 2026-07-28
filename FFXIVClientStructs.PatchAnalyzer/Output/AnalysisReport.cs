@@ -9,6 +9,8 @@ namespace FFXIVClientStructs.PatchAnalyzer.Output;
 public sealed record AnalysisReport(
     int SchemaVersion,
     string RunStatus,
+    string ToolVersion,
+    string RepositoryVersion,
     ArtifactNames Artifacts,
     ReportBinary PreviousBinary,
     ReportBinary CurrentBinary,
@@ -24,7 +26,7 @@ public sealed record AnalysisReport(
 
         var symbols = result.Symbols
             .OrderBy(symbol => symbol.GeneratedName, StringComparer.Ordinal)
-            .Select(ReportSymbol.Create)
+            .Select(symbol => ReportSymbol.Create(symbol, result.Data))
             .ToImmutableArray();
         var statusCounts = symbols
             .GroupBy(symbol => symbol.Status)
@@ -33,6 +35,8 @@ public sealed record AnalysisReport(
         return new AnalysisReport(
             1,
             result.RunStatus,
+            result.ToolVersion,
+            result.RepositoryVersion,
             new ArtifactNames("report.json", "data.candidate.yml"),
             ReportBinary.Create(result.PreviousBinary),
             ReportBinary.Create(result.CurrentBinary),
@@ -60,6 +64,7 @@ public sealed record ReportSymbol(
     LocationKind? LocationKind,
     string Pattern,
     ImmutableArray<ushort> RelativeFollowOffsets,
+    ulong? PreviousDataPreferredVa,
     uint? PreviousDataRva,
     ReportScan PreviousScan,
     ReportScan CurrentScan,
@@ -68,12 +73,15 @@ public sealed record ReportSymbol(
     ImmutableArray<ReportRecoveryEvidence> RecoveryEvidence,
     ReportSignatureProposal? SuggestedSignature,
     ImmutableArray<string> Diagnostics) {
-    internal static ReportSymbol Create(SymbolAnalysis symbol) => new(
+    internal static ReportSymbol Create(SymbolAnalysis symbol, DataCatalog data) => new(
         symbol.GeneratedName,
         symbol.NativeName,
         symbol.LocationKind,
         symbol.Signature.PatternText,
         symbol.Signature.RelativeFollowOffsets,
+        symbol.PreviousDataRva is { } previousDataRva
+            ? data.Locations.Where(location => location.Rva == previousDataRva).Select(location => (ulong?)location.PreferredVa.Value).FirstOrDefault()
+            : null,
         symbol.PreviousDataRva?.Value,
         ReportScan.Create(symbol.PreviousScan),
         ReportScan.Create(symbol.CurrentScan),
@@ -82,6 +90,7 @@ public sealed record ReportSymbol(
         symbol.RecoveryEvidence
             .OrderBy(evidence => evidence.PreviousCallSite?.Value)
             .ThenBy(evidence => evidence.CurrentCallSite?.Value)
+            .ThenBy(evidence => evidence.AnchorKind, StringComparer.Ordinal)
             .Select(ReportRecoveryEvidence.Create)
             .ToImmutableArray(),
         symbol.SuggestedSignature is { } proposal ? ReportSignatureProposal.Create(proposal) : null,
@@ -102,14 +111,55 @@ public sealed record ReportMatch(uint PatternRva, uint ResolvedRva);
 /// <summary>Describes evidence supporting a recovered symbol.</summary>
 public sealed record ReportRecoveryEvidence(
     string AnchorKind,
+    bool Accepted,
     uint PreviousTargetRva,
-    uint CurrentTargetRva,
+    uint? CurrentTargetRva,
     uint? PreviousCallerRva,
     uint? PreviousCallSiteRva,
     uint? CurrentCallerRva,
     uint? CurrentCallSiteRva,
-    string FingerprintSha256) {
-    internal static ReportRecoveryEvidence Create(RecoveryEvidence evidence) => new(evidence.AnchorKind, evidence.PreviousTarget.Value, evidence.CurrentTarget.Value, evidence.PreviousCaller?.Value, evidence.PreviousCallSite?.Value, evidence.CurrentCaller?.Value, evidence.CurrentCallSite?.Value, evidence.FingerprintSha256);
+    string? FingerprintSha256,
+    ImmutableArray<string> FingerprintInputs,
+    ImmutableArray<ReportRecoveryCandidateEvidence> ConsideredCandidates,
+    string? RejectionReason) {
+    internal static ReportRecoveryEvidence Create(RecoveryEvidence evidence) => new(
+        evidence.AnchorKind,
+        evidence.Accepted,
+        evidence.PreviousTarget.Value,
+        evidence.CurrentTarget?.Value,
+        evidence.PreviousCaller?.Value,
+        evidence.PreviousCallSite?.Value,
+        evidence.CurrentCaller?.Value,
+        evidence.CurrentCallSite?.Value,
+        evidence.FingerprintSha256,
+        evidence.FingerprintInputs,
+        evidence.ConsideredCandidates
+            .OrderBy(candidate => candidate.CurrentCaller?.Value)
+            .ThenBy(candidate => candidate.CurrentCallSite?.Value)
+            .ThenBy(candidate => candidate.CurrentTarget?.Value)
+            .ThenBy(candidate => candidate.Rank)
+            .Select(ReportRecoveryCandidateEvidence.Create)
+            .ToImmutableArray(),
+        evidence.RejectionReason);
+}
+
+/// <summary>Describes one candidate considered while evaluating recovery evidence.</summary>
+public sealed record ReportRecoveryCandidateEvidence(
+    uint? CurrentTargetRva,
+    uint? CurrentCallerRva,
+    uint? CurrentCallSiteRva,
+    bool Exact,
+    int Rank,
+    string? FingerprintSha256,
+    string? RejectionReason) {
+    internal static ReportRecoveryCandidateEvidence Create(RecoveryCandidateEvidence evidence) => new(
+        evidence.CurrentTarget?.Value,
+        evidence.CurrentCaller?.Value,
+        evidence.CurrentCallSite?.Value,
+        evidence.Exact,
+        evidence.Rank,
+        evidence.FingerprintSha256,
+        evidence.RejectionReason);
 }
 
 /// <summary>Describes a synthesized signature proposed for review.</summary>
