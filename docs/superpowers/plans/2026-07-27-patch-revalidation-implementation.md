@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build a standalone C# CLI that compares previous and current FFXIV executables, validates every generated signature, recovers uniquely supported one-hop caller matches, and writes deterministic review artifacts without requiring IDA or another reverse-engineering application.
+**Goal:** Build a standalone C# CLI that compares previous and current FFXIV executables, validates every generated signature, recovers uniquely supported structural and caller matches, and writes deterministic review artifacts without requiring IDA or another reverse-engineering application.
 
 **Architecture:** Replace `FFXIVClientStructs.ResolverTester` with a testable `FFXIVClientStructs.PatchAnalyzer` executable. Keep PE loading, generated-signature inventory, scanning, instruction decoding, control-flow indexing, matching, and artifact writing behind repository-owned interfaces; Iced is confined to one decoder adapter. The required path consumes only two PE files and the previous `ida/data.yml`; IDA, Ghidra, Binary Ninja, Rizin, and game-process access remain outside the implementation.
 
@@ -20,10 +20,13 @@
 - Keep Iced types inside `IcedInstructionDecoder`; downstream projects depend only on repository-owned decoder records.
 - Treat `.pdata` as unwind coverage and candidate ranges, not proof that every byte in a range is code.
 - Follow reachable control flow; never linearly classify all `.text` bytes as instructions.
-- Accept automatic YAML changes only for `direct_unique` and `caller_recovered`.
+- Accept automatic YAML changes only for `direct_unique`, `structural_recovered`, and `caller_recovered`.
+- Never accept a fuzzy similarity score or RVA proximity as evidence by itself. Fuzzy whole-function comparison may rank candidates or map callers, but an accepted recovery requires unique structural identity or convergent direct-edge evidence followed by a unique synthesized signature.
 - Preserve YAML comments, ordering, blank lines, and all unrelated text; never overwrite the input YAML.
 - Write artifacts atomically and omit full personal filesystem paths from them.
 - Use `32` as the per-signature match safety limit, `96` as the maximum synthesized-signature length in bytes, and `4` decoded instructions on each side of a call-site fingerprint. Record these values in the report.
+- Do not add Dynamis, ReClass.NET, live-memory access, `AnalysisSnapshot`, `RuntimeObservation`, or structure synchronization to this PoC. They require separate follow-on designs.
+- Do not copy Dynamis code or derive an implementation from its AGPL-3.0-or-later source. Any later use of its heuristic concepts must be an independent implementation with repository-owned tests and evidence records.
 
 ## Source Map
 
@@ -60,6 +63,7 @@
 - `Graph/CallGraphBuilder.cs`: recursive basic-block traversal.
 - `Graph/CallSiteFingerprint.cs`: stable normalized call-site windows.
 - `Matching/DirectMatcher.cs`: old-source validation and current direct result.
+- `Matching/FunctionFingerprintMatcher.cs`: normalized whole-function identity and diagnostic candidate ranking.
 - `Matching/CallerRecoveryMatcher.cs`: one-hop caller/call-site recovery.
 - `Matching/SignatureSynthesizer.cs`: shortest unique replacement signature.
 - `Matching/CandidateClassifier.cs`: explainable status gates.
@@ -87,6 +91,7 @@
 - `Graph/CallGraphBuilderTests.cs`
 - `Graph/CallSiteFingerprintTests.cs`
 - `Matching/DirectMatcherTests.cs`
+- `Matching/FunctionFingerprintMatcherTests.cs`
 - `Matching/CallerRecoveryMatcherTests.cs`
 - `Matching/SignatureSynthesizerTests.cs`
 - `Output/ArtifactWriterTests.cs`
@@ -197,7 +202,7 @@ public enum ExitCode {
 }
 ```
 
-`CommandLine.Parse` must accept only the `analyze` verb, reject duplicate/unknown options, require values after each option, require the four path options, and support the two version overrides. `Program.cs` initially prints usage and returns `InvalidInput` for parsing failures; pipeline delegation is added in Task 12.
+`CommandLine.Parse` must accept only the `analyze` verb, reject duplicate/unknown options, require values after each option, require the four path options, and support the two version overrides. `Program.cs` initially prints usage and returns `InvalidInput` for parsing failures; pipeline delegation is added in Task 13.
 
 - [ ] **Step 4: Run the focused tests and solution build**
 
@@ -805,8 +810,11 @@ public sealed record CallEdge(
 public sealed record FunctionGraph(
     RuntimeFunctionRange Range,
     bool IsSuspect,
-    ImmutableSortedSet<Rva> ReachableInstructions,
-    ImmutableArray<string> Diagnostics);
+    ImmutableArray<DecodedInstruction> Instructions,
+    ImmutableArray<string> Diagnostics) {
+    public ImmutableSortedSet<Rva> ReachableInstructions =>
+        Instructions.Select(instruction => instruction.Rva).ToImmutableSortedSet();
+}
 public sealed class CallGraph {
     public ImmutableArray<FunctionGraph> Functions { get; }
     public ImmutableArray<CallEdge> DirectCalls { get; }
@@ -883,7 +891,7 @@ Expected: analysis and matcher types are missing.
 
 ```csharp
 public enum SymbolStatus {
-    DirectUnique, CallerRecovered, StaleSource, Ambiguous, Missing,
+    DirectUnique, StructuralRecovered, CallerRecovered, StaleSource, Ambiguous, Missing,
     PossibleInlining, NotInData, Unsupported, AnalysisError
 }
 public sealed record AnalysisConfiguration(
@@ -893,12 +901,13 @@ public sealed record AnalysisConfiguration(
     string? PreviousVersionOverride,
     string? CurrentVersionOverride);
 public sealed record RecoveryEvidence(
-    Rva PreviousCaller,
-    Rva PreviousCallSite,
-    Rva CurrentCaller,
-    Rva CurrentCallSite,
-    Rva CurrentTarget,
     string AnchorKind,
+    Rva PreviousTarget,
+    Rva CurrentTarget,
+    Rva? PreviousCaller,
+    Rva? PreviousCallSite,
+    Rva? CurrentCaller,
+    Rva? CurrentCallSite,
     string FingerprintSha256);
 public sealed record SignatureProposal(
     string PatternText,
@@ -936,7 +945,130 @@ git commit -m "feat: classify direct patch matches"
 
 ---
 
-### Task 9: Recover targets through unique caller and call-site fingerprints
+### Task 9: Match normalized whole-function identities
+
+**Files:**
+- Create: `FFXIVClientStructs.PatchAnalyzer/Matching/FunctionFingerprintMatcher.cs`
+- Create: `FFXIVClientStructs.PatchAnalyzer.Tests/Matching/FunctionFingerprintMatcherTests.cs`
+
+**Interfaces:**
+- Produces: deterministic `FunctionFingerprint` values, ranked `FunctionMatchCandidate` diagnostics, and an exact unique target or an explainable non-acceptance status.
+- Consumes: accepted old/current `CallGraph` functions and repository-owned decoded instruction/reference records.
+
+- [ ] **Step 1: Write exact, ambiguous, and diagnostic-ranking tests**
+
+```csharp
+[Fact]
+public void Match_ExactUniqueNormalizedFunction_ReturnsStructuralTarget() {
+    var result = FunctionFingerprintMatcher.Match(
+        TestFunctions.PreviousTarget(),
+        TestFunctions.CurrentExactTargetAndUnrelatedFunctions());
+
+    Assert.Equal(SymbolStatus.StructuralRecovered, result.Status);
+    Assert.Equal(new Rva(0x2800), result.CurrentTarget);
+}
+
+[Fact]
+public void Match_RepeatedSmallFunctionShape_RemainsAmbiguous() {
+    var result = FunctionFingerprintMatcher.Match(
+        TestFunctions.PreviousNineInstructionWrapper(),
+        TestFunctions.CurrentRepeatedWrappers(count: 3));
+
+    Assert.Equal(SymbolStatus.Ambiguous, result.Status);
+}
+
+[Fact]
+public void Rank_FuzzyCandidates_DoesNotUseRvaDistanceOrGrantRecovery() {
+    var result = FunctionFingerprintMatcher.Match(
+        TestFunctions.PreviousTarget(),
+        TestFunctions.CurrentSimilarTargetsAtSwappedRvas());
+
+    Assert.NotEqual(SymbolStatus.StructuralRecovered, result.Status);
+    Assert.All(result.Candidates, candidate => Assert.False(candidate.Exact));
+}
+
+[Fact]
+public void Create_NormalizesRelocatableOperandsButPreservesMemberOffsets() {
+    var oldFunction = TestFunctions.WithRelocatableOperands(
+        callTarget: 0x1800,
+        ripTarget: 0x9000,
+        memberOffset: 0x20);
+    var movedFunction = TestFunctions.WithRelocatableOperands(
+        callTarget: 0x3800,
+        ripTarget: 0xB000,
+        memberOffset: 0x20);
+    var changedLayout = TestFunctions.WithRelocatableOperands(
+        callTarget: 0x3800,
+        ripTarget: 0xB000,
+        memberOffset: 0x28);
+
+    Assert.Equal(
+        FunctionFingerprintMatcher.Create(oldFunction).Sha256,
+        FunctionFingerprintMatcher.Create(movedFunction).Sha256);
+    Assert.NotEqual(
+        FunctionFingerprintMatcher.Create(oldFunction).Sha256,
+        FunctionFingerprintMatcher.Create(changedLayout).Sha256);
+}
+
+[Fact]
+public void Rank_EqualDiagnosticScores_HasDeterministicOrder() {
+    var result = FunctionFingerprintMatcher.Match(
+        TestFunctions.PreviousTarget(),
+        TestFunctions.EqualScoreCandidatesInReverseInputOrder());
+
+    Assert.Equal(
+        result.Candidates.OrderBy(candidate => candidate.CurrentTarget),
+        result.Candidates);
+}
+```
+
+- [ ] **Step 2: Run function matcher tests and confirm failure**
+
+```powershell
+dotnet test .\FFXIVClientStructs.PatchAnalyzer.Tests\FFXIVClientStructs.PatchAnalyzer.Tests.csproj --filter FullyQualifiedName~FunctionFingerprintMatcherTests
+```
+
+Expected: `FunctionFingerprintMatcher`, its records, and the private fixture factory are missing.
+
+- [ ] **Step 3: Implement deterministic whole-function fingerprints**
+
+Build a canonical representation from reachable basic blocks sorted by graph traversal order. Include normalized instruction forms, successor topology, direct-edge kinds, normalized RIP-relative reference categories, and stable non-address scalar constants.
+
+```csharp
+public sealed record FunctionFingerprint(
+    string Sha256,
+    ImmutableArray<string> BasicBlockKeys,
+    int InstructionCount,
+    int DirectEdgeCount);
+
+public sealed record FunctionMatchCandidate(
+    Rva CurrentTarget,
+    bool Exact,
+    int Rank,
+    string FingerprintSha256);
+
+public sealed record FunctionMatchResult(
+    SymbolStatus Status,
+    Rva? CurrentTarget,
+    FunctionFingerprint PreviousFingerprint,
+    ImmutableArray<FunctionMatchCandidate> Candidates);
+```
+
+Exact identity must be unique across the current executable to produce provisional `StructuralRecovered`. Sequence or graph similarity may produce a deterministic ranked diagnostic list but must not produce `StructuralRecovered`, update candidate YAML, or use RVA distance as a scoring input. Small repeated functions stay `Ambiguous`.
+
+Keep `TestFunctions` as a private factory in `FunctionFingerprintMatcherTests.cs`. It must return real `FunctionGraph` and decoded-instruction records rather than a test-only matcher interface.
+
+- [ ] **Step 4: Run tests and commit**
+
+```powershell
+dotnet test .\FFXIVClientStructs.PatchAnalyzer.Tests\FFXIVClientStructs.PatchAnalyzer.Tests.csproj --filter FullyQualifiedName~FunctionFingerprintMatcherTests
+git add .\FFXIVClientStructs.PatchAnalyzer\Matching\FunctionFingerprintMatcher.cs .\FFXIVClientStructs.PatchAnalyzer.Tests\Matching\FunctionFingerprintMatcherTests.cs
+git commit -m "feat: match normalized function identities"
+```
+
+---
+
+### Task 10: Recover targets through caller and call-site evidence
 
 **Files:**
 - Create: `FFXIVClientStructs.PatchAnalyzer/Graph/CallSiteFingerprint.cs`
@@ -946,9 +1078,9 @@ git commit -m "feat: classify direct patch matches"
 
 **Interfaces:**
 - Produces: `RecoveryEvidence` and a unique recovered target or an explainable non-acceptance status.
-- Consumes: old/current graphs, decoded instructions, and direct results for signed caller anchors.
+- Consumes: old/current graphs, function-match results from Task 9, decoded instructions, and direct results for signed caller anchors.
 
-- [ ] **Step 1: Write normalization and one-hop recovery tests**
+- [ ] **Step 1: Write call-site normalization and one-hop recovery tests**
 
 ```csharp
 [Fact]
@@ -972,17 +1104,52 @@ public void Recover_UniqueEquivalentCallSite_ReturnsNewTarget() {
     Assert.Equal(SymbolStatus.CallerRecovered, result.Status);
     Assert.Equal(new Rva(0x2800), result.CurrentTarget);
 }
+
+[Fact]
+public void Recover_TwoStructurallyMappedCallersConverge_ReturnsTarget() {
+    var result = CallerRecoveryMatcher.Recover(
+        TestRecovery.MissingDirectTarget(0x1500),
+        TestGraphs.TwoOldCallersOf(0x1500),
+        TestGraphs.TwoMappedCurrentCallersOf(0x2800),
+        TestRecovery.StructuralCallerMatches());
+
+    Assert.Equal(SymbolStatus.CallerRecovered, result.Status);
+    Assert.Equal(new Rva(0x2800), result.CurrentTarget);
+    Assert.Equal(2, result.RecoveryEvidence.Length);
+}
+
+[Fact]
+public void Recover_StructurallyMappedCallersDisagree_IsAmbiguous() {
+    var result = CallerRecoveryMatcher.Recover(
+        TestRecovery.MissingDirectTarget(0x1500),
+        TestGraphs.TwoOldCallersOf(0x1500),
+        TestGraphs.MappedCurrentCallersOf(0x2800, 0x2900),
+        TestRecovery.StructuralCallerMatches());
+
+    Assert.Equal(SymbolStatus.Ambiguous, result.Status);
+}
+
+[Fact]
+public void Recover_TrustedOldCallSiteSeedsUnreachableDispatchBlock() {
+    var result = CallerRecoveryMatcher.Recover(
+        TestRecovery.MissingCallSiteSignature(0x1230, target: 0x1500),
+        TestGraphs.DispatchBlockReachableOnlyFromTrustedCallSite(0x1230),
+        TestGraphs.UniqueEquivalentDispatchBlock(0x2230, target: 0x2800),
+        TestRecovery.NoSignedCallerAnchors());
+
+    Assert.Equal(new Rva(0x2800), result.CurrentTarget);
+}
 ```
 
-- [ ] **Step 2: Run fingerprint/recovery tests and confirm failure**
+- [ ] **Step 2: Run call-site/recovery tests and confirm failure**
 
 ```powershell
 dotnet test .\FFXIVClientStructs.PatchAnalyzer.Tests\FFXIVClientStructs.PatchAnalyzer.Tests.csproj --filter "FullyQualifiedName~CallSiteFingerprintTests|FullyQualifiedName~CallerRecoveryMatcherTests"
 ```
 
-Expected: fingerprint and recovery types are missing.
+Expected: call-site fingerprint and recovery types are missing.
 
-- [ ] **Step 3: Implement deterministic fingerprinting**
+- [ ] **Step 3: Implement deterministic call-site fingerprinting**
 
 Create a window of up to four reachable instructions before and after a direct call within the same function. Hash UTF-8 `OpcodeKey` values plus instruction bytes after zeroing branch displacements, RIP-relative displacements, and image-range pointer immediates; preserve small scalar immediates and non-RIP stack/member displacements.
 
@@ -995,22 +1162,25 @@ public sealed record CallSiteFingerprint(
 
 - [ ] **Step 4: Implement ordered recovery rules**
 
-For every old incoming direct call:
+For a missing or ambiguous direct result:
 
 1. return `Unsupported` without graph recovery when the location kind is not `Function`;
-2. prefer a caller whose generated signature is `DirectUnique` in both images;
-3. otherwise use the call-site fingerprint index;
-4. require one equivalent current call-site;
-5. require all accepted independent anchors to converge on one target;
-6. return `Ambiguous` for competing sites or targets;
-7. return `PossibleInlining` when old direct edges exist but no equivalent current direct edge exists;
-8. return `Unsupported` when only indirect edges or suspect functions could support the result.
+2. gather every old incoming direct call and prefer a caller whose generated signature is `DirectUnique` in both images;
+3. otherwise map a caller when Task 9 found its exact unique normalized whole-function identity;
+4. retain fuzzy caller rankings for diagnostics only; a fuzzy caller cannot anchor recovery by itself;
+5. seed decoding at the trusted old signature call-site when the call lies in a dispatch block not reached from the `.pdata` entry traversal;
+6. for a trusted seed, require Task 9 to have exactly mapped the enclosing current function, enumerate leading `E8`/`E9` opcode candidates only inside that range, bounded-decode from each candidate, and treat raw opcode hits only as candidate locations;
+7. require one normalized current call-site and follow its direct edge;
+8. require all accepted independent anchors to converge on one target;
+9. return `Ambiguous` for competing sites, targets, or a merely fuzzy enclosing-function mapping;
+10. return `PossibleInlining` when old direct edges exist but no equivalent current direct edge exists;
+11. return `Unsupported` when only indirect edges or suspect functions could support the result.
 
-Recovery does not yet grant candidate-YAML eligibility; Task 10 must synthesize and revalidate a unique signature first.
+Recovery does not yet grant candidate-YAML eligibility; Task 11 must synthesize and revalidate a unique signature first.
 
-In the tests, keep `TestRecovery` and `TestGraphs` as private factories in `CallerRecoveryMatcherTests.cs`. They must return real `SymbolAnalysis`, `CallGraph`, and signed-caller dictionaries rather than alternate test-only interfaces.
+Keep `TestRecovery` and `TestGraphs` as private factories in `CallerRecoveryMatcherTests.cs`. They must return real `SymbolAnalysis`, `CallGraph`, Task 9 function-match results, and signed-caller dictionaries rather than alternate test-only interfaces.
 
-- [ ] **Step 5: Add ambiguity and convergence tests, run, and commit**
+- [ ] **Step 5: Run tests and commit**
 
 ```powershell
 dotnet test .\FFXIVClientStructs.PatchAnalyzer.Tests\FFXIVClientStructs.PatchAnalyzer.Tests.csproj --filter "FullyQualifiedName~CallSiteFingerprintTests|FullyQualifiedName~CallerRecoveryMatcherTests"
@@ -1020,7 +1190,7 @@ git commit -m "feat: recover targets through caller evidence"
 
 ---
 
-### Task 10: Synthesize and revalidate the shortest unique replacement signature
+### Task 11: Synthesize and revalidate the shortest unique replacement signature
 
 **Files:**
 - Create: `FFXIVClientStructs.PatchAnalyzer/Matching/SignatureSynthesizer.cs`
@@ -1078,9 +1248,9 @@ Return the `SignatureProposal` record introduced in Task 8. Start at the recover
 
 Implement `TestSynthesis` as a private fixture factory in `SignatureSynthesizerTests.cs`; each context exposes real `PeImage`, `FunctionIndex`, `IInstructionDecoder`, `SignatureScanner`, and `SignatureSynthesizer` instances.
 
-- [ ] **Step 4: Gate `caller_recovered` on proposal validation**
+- [ ] **Step 4: Gate recovered statuses on proposal validation**
 
-`CandidateClassifier` may retain the recovered target as diagnostic evidence, but it changes the final status to `CallerRecovered` only when the proposal rescans uniquely to that target. Otherwise use `Ambiguous` or `Missing` and leave `SuggestedSignature` null.
+`CandidateClassifier` may retain the recovered target as diagnostic evidence, but it changes the final status to `StructuralRecovered` or `CallerRecovered` only when the proposal rescans uniquely to that target. Otherwise use `Ambiguous` or `Missing` and leave `SuggestedSignature` null.
 
 - [ ] **Step 5: Run tests and commit**
 
@@ -1092,7 +1262,7 @@ git commit -m "feat: synthesize unique replacement signatures"
 
 ---
 
-### Task 11: Write deterministic JSON and exact candidate YAML atomically
+### Task 12: Write deterministic JSON and exact candidate YAML atomically
 
 **Files:**
 - Create: `FFXIVClientStructs.PatchAnalyzer/Analysis/PatchAnalysisResult.cs`
@@ -1198,7 +1368,7 @@ git commit -m "feat: write reviewable patch artifacts"
 
 ---
 
-### Task 12: Orchestrate preflight, analysis, cancellation, and exit codes
+### Task 13: Orchestrate preflight, analysis, cancellation, and exit codes
 
 **Files:**
 - Create: `FFXIVClientStructs.PatchAnalyzer/Analysis/PatchAnalyzerApplication.cs`
@@ -1260,7 +1430,7 @@ Return `InvalidInput` and write diagnostics to stderr for any preflight failure.
 
 - [ ] **Step 4: Implement the pipeline and symbol-local isolation**
 
-Run old/current signature scanning, graph construction, direct matching, caller recovery, synthesis, classification, and output in that order. Catch parser/decoder/matcher exceptions around each symbol and emit `AnalysisError` without stopping independent symbols. Catch an invariant failure around the whole pipeline, atomically write a failed report when identities and output are already valid, omit candidate YAML, and return `FatalAnalysis`.
+Run old/current signature scanning, graph construction, direct matching, whole-function matching, caller recovery, synthesis, classification, and output in that order. Catch parser/decoder/matcher exceptions around each symbol and emit `AnalysisError` without stopping independent symbols. Before writing artifacts, require exactly one terminal `SymbolAnalysis` per inventory entry and require the status counts to sum to the inventory count. Catch an invariant failure around the whole pipeline, atomically write a failed report when identities and output are already valid, omit candidate YAML, and return `FatalAnalysis`.
 
 ```csharp
 public sealed class PatchAnalyzerApplication {
@@ -1307,7 +1477,7 @@ git commit -m "feat: orchestrate patch revalidation"
 
 ---
 
-### Task 13: Complete synthetic acceptance coverage and the operator runbook
+### Task 14: Complete synthetic acceptance coverage and the operator runbook
 
 **Files:**
 - Modify: `FFXIVClientStructs.PatchAnalyzer.Tests/Integration/PatchAnalyzerApplicationTests.cs`
@@ -1323,15 +1493,31 @@ git commit -m "feat: orchestrate patch revalidation"
 Create independent old/new PE pairs for:
 
 1. original signature remains valid and moves, yielding `direct_unique`;
-2. target prologue changes but caller context survives, yielding `caller_recovered`;
-3. two equivalent current anchors, yielding `ambiguous`;
-4. old direct call disappears, yielding `possible_inlining`;
-5. old signature conflicts with YAML, yielding `stale_source`;
-6. call-site signature resolves through relative-follow offset `1`;
-7. comments/order/blank lines survive candidate YAML;
-8. two runs with different elapsed timings produce byte-identical JSON/YAML;
-9. embedded jump-table bytes remain unreachable;
-10. one symbol's reachable invalid instruction yields `analysis_error` while another symbol completes.
+2. target prologue changes but its normalized whole-function identity is unique, yielding `structural_recovered`;
+3. target prologue changes but two structurally mapped callers converge, yielding `caller_recovered`;
+4. a repeated small-function identity stays `ambiguous`;
+5. two equivalent current anchors yield `ambiguous`;
+6. old direct call disappears, yielding `possible_inlining`;
+7. old signature conflicts with YAML, yielding `stale_source`;
+8. call-site signature resolves through relative-follow offset `1`;
+9. comments/order/blank lines survive candidate YAML;
+10. two runs with different elapsed timings produce byte-identical JSON/YAML;
+11. embedded jump-table bytes remain unreachable while its trusted old signature call-site can seed a bounded block;
+12. one symbol's reachable invalid instruction yields `analysis_error` while another symbol completes.
+
+Also add an inventory-accounting assertion to every integration fixture:
+
+```csharp
+Assert.Equal(
+    fixture.Inventory.Length,
+    result.Symbols.Length);
+Assert.Equal(
+    fixture.Inventory.Length,
+    result.Symbols.GroupBy(symbol => symbol.Status).Sum(group => group.Count()));
+Assert.Empty(
+    fixture.Inventory.Select(item => item.GeneratedName)
+        .Except(result.Symbols.Select(symbol => symbol.GeneratedName), StringComparer.Ordinal));
+```
 
 - [ ] **Step 2: Run the complete PatchAnalyzer test project**
 
@@ -1353,7 +1539,9 @@ dotnet run --project .\FFXIVClientStructs.PatchAnalyzer -- analyze `
     --out .\artifacts\patch-analysis
 ```
 
-Explain binary retention/hash capture, version-source checks, every status, review of `caller_recovered` evidence, copying suggested C# signatures only after semantic/ABI inspection, diff review of candidate YAML, `data-validator.js`, build/tests/format/CExporter, report path privacy, and the fact that IDA/Ghidra are optional investigation tools rather than dependencies.
+Explain binary retention/hash capture, version-source checks, every status, review of `structural_recovered` and `caller_recovered` evidence, copying suggested C# signatures only after semantic/ABI inspection, diff review of candidate YAML, `data-validator.js`, build/tests/format/CExporter, report path privacy, and the fact that IDA/Ghidra are optional investigation tools rather than dependencies.
+
+Also state that Dynamis and ReClass.NET are optional manual companions, not PatchAnalyzer inputs. Dynamis observations are live-process heuristics without the binary-identity and provenance contract required for automatic evidence; IPFD and COM probing are outside this workflow. ReClass.NET-generated C# is not ABI-authoritative and may only inform a separately reviewed structure proposal.
 
 - [ ] **Step 4: Run full repository verification**
 
@@ -1371,6 +1559,13 @@ Expected: build succeeds, both test projects pass, formatting reports no changes
 - [ ] **Step 5: Run the optional local real-binary smoke test**
 
 Use retained old/current FFXIV executables when both are available. Do not commit the command's output directory. Confirm the report contains hashes, version sources, workload counts, status counts, no full local paths, and no automatic candidate based on suspect functions or ambiguous evidence.
+
+The 2026-07-28 local reference pair is:
+
+- previous SHA-256 `4236E770E673150E85F8D10BEAB2FC4834C82F86AAB8A555A9175439FC906A6D`, corresponding to `ida/data.yml` version `2026.06.18.0000.0000`;
+- current SHA-256 `9483706DDCCC700F95DC4F25ECA500B3B5B0B1BDD2B4297FAE3C69C95A9BD964`, with sibling version `2026.07.16.0001.0000`.
+
+With the inventory at design commit time, the expected direct scan is previous `0/2219/3` and current `4/2212/6` for zero/unique/multiple matches. Expected names and aggregate counts are a diagnostic baseline, not a fixed test gate: if the generated inventory changes, the report must explain the inventory delta instead of silently updating these values.
 
 - [ ] **Step 6: Commit runbook and acceptance coverage**
 
@@ -1398,6 +1593,8 @@ Confirm:
 - no executable, extracted bytes, report, or candidate YAML is tracked;
 - the runtime resolver's behavior is unchanged;
 - all accepted candidates have unique scanner evidence;
+- no accepted structural candidate relies only on fuzzy similarity or RVA proximity;
 - all Iced references remain confined to the adapter and project package reference;
 - the CLI operates with no installed IDA, Ghidra, Binary Ninja, Rizin, or debugger;
+- no Dynamis, ReClass.NET, live-memory, `AnalysisSnapshot`, or `RuntimeObservation` dependency or implementation was introduced;
 - every implementation task is represented by a focused commit.

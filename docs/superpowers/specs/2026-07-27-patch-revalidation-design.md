@@ -92,6 +92,7 @@ This is useful process knowledge and directly motivates one-hop call-graph recov
 - Inventory every signature generated from the C# declarations.
 - Distinguish zero, one, and multiple signature matches.
 - Validate old matches against the previous `data.yml` address.
+- Recover a broken function through an exact, unique normalized whole-function identity.
 - Recover a broken function signature through one direct caller/call-site hop when the evidence is unique.
 - Generate a new, uniquely validated signature for a recovered target.
 - Produce deterministic `report.json` and `data.candidate.yml` artifacts.
@@ -110,6 +111,8 @@ This is useful process knowledge and directly motivates one-hop call-graph recov
 - Replace `ida/data.yml`.
 - Require IDA, Ghidra, Binary Ninja, Rizin, or a debugger.
 - Attach to or automate the running game.
+- Integrate Dynamis, ReClass.NET, or another live-memory tool into the required path.
+- Synchronize IDA and ReClass.NET databases or import runtime observations as automatic mapping evidence.
 - Commit, push, or publish generated candidates automatically.
 
 ## Technical Approach
@@ -122,7 +125,7 @@ Evolve `FFXIVClientStructs.ResolverTester` into `FFXIVClientStructs.PatchAnalyze
 
 Use the Iced package behind a narrow decoder interface for the PoC. Iced is pure C#, MIT-licensed, exposes control-flow and operand information, and is compatible with the repository's .NET target. Its most recent NuGet release is from 2024, so the dependency must be isolated and covered by byte-level fixtures.
 
-The decoder choice was smoke-tested read-only against FFXIV build `2026.06.18.0000.0000`, SHA-256 `4236E770E673150E85F8D10BEAB2FC4834C82F86AAB8A555A9175439FC906A6D`. A diagnostic linear pass with Iced 1.21 advanced through approximately 7.76 million decode steps across 172,905 x64 runtime-function ranges without crossing a range boundary. It also encountered tables and padding embedded in `.text`; this pass demonstrates compatibility with the current binary's instruction encoding, but it does not prove that every covered byte is code. The production preflight therefore validates reachable instructions from accepted function entries and signature anchors instead of requiring every byte in a runtime-function range to decode as code.
+The decoder choice was first smoke-tested read-only against FFXIV build `2026.06.18.0000.0000`, SHA-256 `4236E770E673150E85F8D10BEAB2FC4834C82F86AAB8A555A9175439FC906A6D`. A diagnostic linear pass with Iced 1.21 advanced through approximately 7.76 million decode steps across 172,905 x64 runtime-function ranges without crossing a range boundary. It also encountered tables and padding embedded in `.text`; this pass demonstrates compatibility with that binary's instruction encoding, but it does not prove that every covered byte is code. The 2026-07-28 patch-pair validation below repeats the compatibility check against the newer executable. The production preflight therefore validates reachable instructions from accepted function entries and signature anchors instead of requiring every byte in a runtime-function range to decode as code.
 
 References:
 
@@ -164,6 +167,45 @@ Reference:
 
 - <https://github.com/usernameak/IDADiffCalculator-NG>
 
+#### Dynamis
+
+The Dynamis source was reviewed at commit `04df4390607b4619ed08d3a0a309aef4e48e3628` (`0.1.4.2`). It is a Dalamud development and reverse-engineering toolbox that operates inside the live game process. Its object inspector combines the installed FFXIVClientStructs assembly, an already-updated `data.yml`, live memory protection and module information, and Iced-based instruction heuristics.
+
+Dynamis does not revalidate `data.yml` or compare old and new executables. Its YAML parser consumes resolved globals, functions, instances, vtables, and virtual-function indexes; `DataYamlContainer` translates the preferred image base `0x140000000` to the current process base. The automatic download path follows `aers/FFXIVClientStructs` `main`, but it does not bind the downloaded YAML to the current executable's SHA-256 before dereferencing its addresses. It is therefore a downstream consumer of the patch process, not an implementation of patch revalidation.
+
+Several independently useful concepts appear in its heuristics:
+
+- recognize an MSVC x64 `this`-adjustor thunk shaped like `sub rcx, <displacement>; jmp <target>`;
+- infer a possible allocation size from a destructor that loads a constant into `edx` before calling a known game deallocator;
+- estimate a vtable extent from consecutive pointers into executable memory;
+- retain size observations from the managed type, destructor, and inspection context as distinct evidence.
+
+These are heuristic observations rather than semantic proof. A future static implementation must retain the originating rule, inspected RVAs, and competing estimates instead of collapsing them into an unexplained result.
+
+Dynamis is not a suitable automated backend for the required path. Its D3D11/DXGI classification calls `QueryInterface`, `Release`, and descriptor methods on live COM objects. IPFD installs a vectored exception handler and distributes hardware breakpoints through thread debug registers. Its versioned IPC can open inspectors and return a class name, managed type, estimated size, and displacement, but it does not export a deterministic evidence artifact with binary identity and rule provenance.
+
+The project is licensed AGPL-3.0-or-later. No Dynamis implementation will be copied into this MIT-licensed repository. Only independently implemented concepts may be considered, and any future interoperability must occur through an external, versioned artifact.
+
+References:
+
+- <https://github.com/Exter-N/Dynamis/tree/04df4390607b4619ed08d3a0a309aef4e48e3628>
+- <https://github.com/Exter-N/Dynamis/blob/04df4390607b4619ed08d3a0a309aef4e48e3628/Dynamis/Interop/MemoryHeuristics.cs>
+- <https://github.com/Exter-N/Dynamis/blob/04df4390607b4619ed08d3a0a309aef4e48e3628/docs/ipc-api.md>
+
+#### ReClass.NET
+
+ReClass.NET is a live-memory structure exploration tool with x86/x64 support, typed memory nodes, automatic node dissection, pointer and vtable views, RTTI display, plugins, and C++/C# generators. Its `.rcnet` format is a ZIP archive containing a versioned `Data.xml` document with classes, nodes, enums, address formulas, comments, and plugin custom data. That makes a narrow, independently implemented file adapter feasible without automating the ReClass.NET UI.
+
+The built-in C# generator is not a source of ClientStructs declarations. Although it emits explicit layouts and field offsets, it also emits managed strings and `MarshalAs`, omits repository-specific interop attributes, and cannot establish native semantics or ABI. A future import must therefore produce a reviewable structure diff or proposal artifact; it must never edit ABI-facing C# automatically.
+
+ReClass.NET is MIT-licensed and is the more practical first optional structure adapter. The preferred direction is `AnalysisSnapshot` or reviewed ClientStructs metadata to `.rcnet`. A reverse adapter may compare a `.rcnet` project with known layouts, but synchronization remains explicit and review-only. The design does not create a direct IDA-to-ReClass bridge.
+
+References:
+
+- <https://github.com/ReClassNET/ReClass.NET>
+- <https://github.com/ReClassNET/ReClass.NET/blob/master/ReClass.NET/DataExchange/ReClass/ReClassNetFile.Write.cs>
+- <https://github.com/ReClassNET/ReClass.NET/blob/master/ReClass.NET/CodeGenerator/CSharpCodeGenerator.cs>
+
 #### Rizin
 
 Rizin supports PE/PE+, headless scripting, and `rz-diff`. It may be benchmarked later as an optional backend.
@@ -189,7 +231,9 @@ flowchart LR
     S -->|"One match"| V["Direct validation"]
     S -->|"Zero or multiple matches"| G["Previous and current call graphs"]
 
-    G --> R["One-hop caller/call-site recovery"]
+    G --> F["Normalized whole-function matching"]
+    F --> R["Caller/call-site recovery and convergence"]
+    F --> Q["Rule-based classification"]
     R --> Q["Rule-based classification"]
     V --> Q
 
@@ -260,11 +304,24 @@ flowchart LR
 - Scans the current executable and classifies zero, one, or multiple matches.
 - Produces `direct_unique` only for a unique current match with valid relative-follow results.
 
+#### `FunctionFingerprintMatcher`
+
+- Builds a repository-owned normalized fingerprint from reachable instruction forms, basic-block topology, direct-edge shape, and normalized code/data references.
+- Uses exact whole-function identity as a high-quality candidate source and bounded sequence/graph similarity only to rank candidates or map callers.
+- Never accepts a fuzzy score, instruction-count similarity, or RVA proximity as sufficient evidence.
+- Requires uniqueness across the current executable for a direct structural recovery.
+- Allows a structurally unique caller to anchor `CallerRecoveryMatcher`; multiple independent mapped callers must converge on the same current target.
+- Treats small wrapper functions with repeated shapes as ambiguous until a caller, dispatcher position, referenced datum, or another independent contextual anchor disambiguates them.
+- Records the fingerprint inputs and rejected candidates so the result can be reproduced without an IDA database.
+
 #### `CallerRecoveryMatcher`
 
 - Starts from a known old target and gathers direct incoming callers.
 - Prefers callers already anchored by a generated signature that resolves uniquely in both images.
-- Otherwise normalizes a bounded instruction window around the old call-site.
+- Otherwise uses a unique structural caller mapping and normalizes a bounded instruction window around the old call-site.
+- Seeds decoding from a trusted old signature call-site when a jump-table dispatch block is not reachable from the `.pdata` entry traversal.
+- For such a seed, searches leading direct-branch opcode candidates only inside an exactly mapped current enclosing function, bounded-decodes each candidate, and requires one normalized block/call-site match. Raw opcode hits are candidate locations, not proof that their bytes are code.
+- Keeps the result diagnostic when the enclosing function has only a fuzzy mapping or the bounded block match is not unique.
 - Locates a unique equivalent caller/call-site in the current executable.
 - Follows the equivalent direct edge to a current target.
 - Records every considered anchor, rejected ambiguity, and final edge.
@@ -286,6 +343,7 @@ Uses explainable statuses instead of an opaque confidence percentage.
 | Status | Meaning | Candidate YAML |
 | --- | --- | --- |
 | `direct_unique` | Existing signature is unique in both images and old result agrees with `data.yml` | Apply |
+| `structural_recovered` | A unique normalized whole-function identity maps the old target and a new unique signature resolves it | Apply |
 | `caller_recovered` | Unique old anchor maps to a unique current call edge and a new unique signature resolves the target | Apply |
 | `stale_source` | Old signature result does not agree with the previous `data.yml` location | Do not apply |
 | `ambiguous` | Pattern, caller, call-site, or target has multiple valid candidates | Do not apply |
@@ -325,17 +383,19 @@ flowchart TD
 
     D --> E{"Current match count"}
     E -->|"One"| F["direct_unique"]
-    E -->|"Zero or multiple"| G["Find incoming callers of old target"]
+    E -->|"Zero or multiple"| G["Match normalized whole-function identity"]
 
-    G --> H["Normalize caller and call-site context"]
-    H --> I["Find equivalent current anchor"]
-    I --> J{"Unique equivalent direct edge?"}
+    G --> H{"Unique structural target?"}
+    H -->|"Yes"| S["Candidate structural target"]
+    H -->|"No"| I["Find and map incoming callers or trusted call-site"]
+    I --> J{"Unique equivalent direct edge or convergent callers?"}
 
     J -->|"No"| K["ambiguous, missing, or possible_inlining"]
     J -->|"Yes"| L["Recovered current target"]
-    L --> N["Synthesize shortest unique signature"]
+    S --> N["Synthesize shortest unique signature"]
+    L --> N
     N --> O{"Signature uniquely resolves recovered target?"}
-    O -->|"Yes"| P["caller_recovered"]
+    O -->|"Yes"| P["structural_recovered or caller_recovered"]
     O -->|"No"| K
 
     F --> Y["Eligible for candidate YAML"]
@@ -467,13 +527,69 @@ Required scenarios:
 5. the old signature conflicts with the YAML address, producing `stale_source`;
 6. relative-follow offsets resolve a call-site signature;
 7. comments and ordering survive candidate-YAML generation;
-8. identical runs produce byte-identical JSON and YAML.
+8. identical runs produce byte-identical JSON and YAML;
 9. a runtime-function range containing an embedded jump table does not decode the table as instructions;
 10. an invalid instruction reachable from a trusted entry produces `analysis_error`, while invalid bytes in unreachable padding do not.
+11. a unique normalized whole-function identity produces `structural_recovered`;
+12. a repeated small-function identity remains `ambiguous`;
+13. two structurally mapped callers converge on one target;
+14. a trusted old call-site seeds a dispatcher block that entry-only traversal cannot reach.
 
 ### Local real-binary smoke test
 
 When an operator has both builds locally, the runbook may include a non-CI smoke test. The report records hashes and aggregate results, not binaries or unrelated extracted bytes. Sharing the report requires reviewing it for personal paths before publication.
+
+The design was exercised against a retained real patch pair on 2026-07-28. This was a read-only, uncommitted diagnostic run; the executables and extracted bytes remain outside the repository.
+
+| Identity | Previous | Current |
+| --- | --- | --- |
+| Game/version source | `ida/data.yml`: `2026.06.18.0000.0000` | sibling `ffxivgame.ver`: `2026.07.16.0001.0000` |
+| Length | 51,785,984 bytes | 51,753,216 bytes |
+| SHA-256 | `4236E770E673150E85F8D10BEAB2FC4834C82F86AAB8A555A9175439FC906A6D` | `9483706DDCCC700F95DC4F25ECA500B3B5B0B1BDD2B4297FAE3C69C95A9BD964` |
+
+The existing ResolverTester resolved all 2,222 generated signatures in the previous executable and 2,218 in the current executable. The current build had 2,017 YAML address mismatches, only 26 unchanged YAML addresses, and four missing signatures:
+
+1. `ImmediateContext.DoSetTargetCommand`;
+2. `PacketDispatcher.HandleMapEffectPacket`;
+3. `AtkServer.Draw`;
+4. `SteamApi.Dtor`.
+
+This confirms that patch-day cost is dominated by transporting and proving moved locations, not by rewriting thousands of signatures. The previous baseline also had four signature/YAML disagreements, demonstrating why the `stale_source` gate must run before transport:
+
+| Generated name | Previous signature result RVA | Previous YAML RVA |
+| --- | ---: | ---: |
+| `FashionCheckManager.Instance` | `0xB17D40` | `0x2AB4BA8` |
+| `EventObject.GetEventHandlers` | `0x174DE10` | `0x898A40` |
+| `SqPackManager.TryGetOffsetFromIndex` | `0x1883266` | `0x1883760` |
+| `SqPackManager.TryGetOffsetFromIndex2` | `0x18833B5` | `0x18839C0` |
+
+The smoke test does not decide whether each disagreement is stale YAML, correlation semantics, or another legacy issue. It only proves that none may be transported automatically.
+
+ResolverTester's category totals account for 2,220 of the 2,222 registered addresses in both runs because two control paths leave an address without a terminal category. The replacement inventory must emit exactly one final status for every generated address and assert that the status counts sum to the inventory count.
+
+An all-match scanner over every executable section produced this cardinality:
+
+| Result | Previous | Current |
+| --- | ---: | ---: |
+| Zero matches | 0 | 4 |
+| Unique matches | 2,219 | 2,212 |
+| Multiple matches | 3 | 6 |
+
+Three signatures changed from unique to multiple in the current build. This validates the requirement to enumerate matches instead of inheriting the runtime resolver's first-match behavior.
+
+The PE exception directory contained 172,905 usable previous ranges and 172,985 usable current ranges. A deliberately linear diagnostic decode encountered 8,861 and 8,994 invalid instructions respectively, but Iced never crossed a bounded runtime-function range. The invalid bytes are evidence that `.pdata` is not a license to decode every covered byte as code; the production graph must follow reachable blocks. The successful bounded decode also validates Iced 1.21.0 against this current `ffxiv_dx11.exe`.
+
+A focused graph prototype then exposed a gap in the original caller-only design:
+
+- entry-reachable one-hop caller matching recovered none of the four missing signatures;
+- `ImmediateContext.DoSetTargetCommand` had one exact normalized function-shape candidate at RVA `0x22B570`;
+- `AtkServer.Draw` had two independently mapped callers that converged on RVA `0x63B3C0`;
+- `SteamApi.Dtor` had two independently mapped callers that converged on RVA `0x7929B0`;
+- `HandleMapEffectPacket` had 44 identical nine-instruction function-shape candidates, so function shape alone was correctly ambiguous. Aligning the trusted old dispatcher call-site at RVA `0x84C42E` with the corresponding current block at RVA `0x84C42F` selected a call target at RVA `0xB46460`, but this remains a contextual candidate until the production matcher records and validates the dispatcher alignment evidence.
+
+The old `DoSetTargetCommand` and `HandleMapEffectPacket` signature call-sites were both contained by valid runtime-function ranges but were not reachable from those ranges' entry traversal. This explains why an entry-only graph found no incoming edge and validates bounded decoding from a trusted old signature anchor. The enclosing packet-dispatch function itself changed structurally, so its fuzzy current candidate cannot be promoted to an automatic anchor.
+
+These RVAs are validation candidates, not semantic proof or proposed source updates. The prototype intentionally did not write C#, YAML, or analysis artifacts. It establishes that normalized whole-function matching and trusted call-site seeds belong in the PoC rather than a follow-on phase, while fuzzy scores and address proximity must remain diagnostic only.
 
 ### Performance
 
@@ -516,12 +632,13 @@ The test project will be separate from `InteropGenerator.Tests` because it tests
 4. Run PatchAnalyzer with explicit old/new/data/output paths.
 5. Confirm the binary identity block and previous-version agreement.
 6. Review summary counts in `report.json`.
-7. Review every `caller_recovered` entry and its anchor evidence.
+7. Review every `structural_recovered` and `caller_recovered` entry and its anchor evidence.
 8. Copy suggested C# signatures only after static inspection confirms owner and ABI.
 9. Review the textual diff between `data.yml` and `data.candidate.yml`.
 10. Resolve manual items with IDA, Ghidra, Binary Ninja, or another static tool as needed.
-11. Run `data-validator.js`, build, generator tests, formatting, and CExporter.
-12. Commit only reviewed declarations and data changes; never commit executables or local reports containing personal paths.
+11. Use Dynamis or ReClass.NET only as optional manual companions; their live observations are not PatchAnalyzer inputs or automatic mapping evidence.
+12. Run `data-validator.js`, build, generator tests, formatting, and CExporter.
+13. Commit only reviewed declarations and data changes; never commit executables or local reports containing personal paths.
 
 ## Acceptance Criteria
 
@@ -532,7 +649,7 @@ The PoC is complete when:
 - PatchAnalyzer has a dedicated passing test project;
 - every generated C# address definition is inventoried;
 - the scanner reports zero, one, and multiple matches;
-- synthetic fixtures demonstrate both `direct_unique` and `caller_recovered`;
+- synthetic fixtures demonstrate `direct_unique`, `structural_recovered`, and `caller_recovered`;
 - a recovered target receives a unique, revalidated signature suggestion;
 - `report.json` is deterministic and contains the required evidence;
 - `data.candidate.yml` preserves source formatting and changes only accepted tokens;
@@ -544,11 +661,15 @@ The PoC is complete when:
 
 These phases are separate future designs:
 
-1. expand graph recovery beyond one direct hop;
-2. add normalized whole-function fingerprints and graph voting;
-3. cover unsigned `data.yml` functions, vtables, instances, and globals;
-4. expose report-import adapters for IDA, Ghidra, and Binary Ninja;
-5. define a versioned, tool-neutral `AnalysisSnapshot` contract and evaluate optional IDA/Ghidra exporters against it;
-6. evaluate Ghidra Version Tracking or Rizin as optional comparison backends;
-7. benchmark a Zydis decoder adapter if Iced compatibility or maintenance becomes a blocker;
-8. add stable performance-regression gates after collecting representative local benchmarks.
+1. expand graph recovery beyond one direct hop and add graph-neighborhood voting;
+2. cover unsigned `data.yml` functions, vtables, instances, and globals;
+3. expose report-import adapters for IDA, Ghidra, and Binary Ninja;
+4. define a versioned, tool-neutral `AnalysisSnapshot` contract;
+5. evaluate optional IDA/Ghidra exporters against `AnalysisSnapshot`;
+6. add a ReClass.NET `.rcnet` export adapter and a separate review-only structure-diff importer;
+7. independently implement static `this`-adjustor, destructor-size, and vtable-shape evidence rules, preserving each rule's provenance and competing estimates;
+8. define a `RuntimeObservation` contract containing executable SHA-256, module, RVA, observation method, result, and reviewer disposition;
+9. consider Dynamis interoperability only after a deterministic external export exists; never require IPFD or game-process access;
+10. evaluate Ghidra Version Tracking or Rizin as optional comparison backends;
+11. benchmark a Zydis decoder adapter if Iced compatibility or maintenance becomes a blocker;
+12. add stable performance-regression gates after collecting representative local benchmarks.
