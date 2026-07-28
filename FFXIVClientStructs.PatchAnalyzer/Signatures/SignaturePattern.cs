@@ -25,6 +25,9 @@ public sealed record SignaturePattern(ImmutableArray<byte> Bytes, ImmutableArray
             mask.Add(byte.MaxValue);
         }
 
+        if (bytes.Count == 0 || mask.All(value => value == 0))
+            throw new ArgumentException("A signature pattern must contain at least one non-wildcard byte.", nameof(text));
+
         return new SignaturePattern(bytes.MoveToImmutable(), mask.MoveToImmutable());
     }
 
