@@ -38,6 +38,20 @@ public sealed class SyntheticPeBuilder {
         return this;
     }
 
+    public SyntheticPeBuilder WithRuntimeFunctions(params RuntimeFunctionSpec[] runtimeFunctions) {
+        var bytes = new byte[checked(runtimeFunctions.Length * 12)];
+        foreach (var (runtimeFunction, index) in runtimeFunctions.OrderBy(runtimeFunction => runtimeFunction.BeginRva).Select((runtimeFunction, index) => (runtimeFunction, index))) {
+            var record = bytes.AsSpan(index * 12, 12);
+            BinaryPrimitives.WriteUInt32LittleEndian(record, runtimeFunction.BeginRva);
+            BinaryPrimitives.WriteUInt32LittleEndian(record[4..], runtimeFunction.EndRva);
+            BinaryPrimitives.WriteUInt32LittleEndian(record[8..], runtimeFunction.UnwindRva);
+        }
+
+        var rva = GetNextSectionRva();
+        WithSection(".pdata", rva, bytes, executable: false);
+        return WithExceptionDirectory(rva, bytes.Length);
+    }
+
     public SyntheticPeBuilder WithAdjacentVersion(string version) {
         adjacentVersion = version;
         return this;
@@ -100,11 +114,15 @@ public sealed class SyntheticPeBuilder {
 
     private uint GetImageEnd() => sections.Count == 0 ? (uint)SectionAlignment : sections.Max(section => section.Rva + (uint)section.Bytes.Length);
 
+    private uint GetNextSectionRva() => checked((uint)Align(checked((int)GetImageEnd()), SectionAlignment));
+
     private static int Align(int value, int alignment) => (value + alignment - 1) / alignment * alignment;
 
     private sealed record SectionDefinition(string Name, uint Rva, byte[] Bytes, bool Executable);
     private sealed record SectionLayout(SectionDefinition Definition, int FileOffset);
 }
+
+public readonly record struct RuntimeFunctionSpec(uint BeginRva, uint EndRva, uint UnwindRva);
 
 public sealed class SyntheticPeFixture(string directoryPath, string executablePath) : IDisposable {
     public string DirectoryPath { get; } = directoryPath;
