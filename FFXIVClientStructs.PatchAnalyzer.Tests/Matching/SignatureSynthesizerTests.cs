@@ -40,6 +40,80 @@ public class SignatureSynthesizerTests {
     }
 
     [Fact]
+    public void Synthesize_MasksBranchAndRipRelativeEncodedBytes() {
+        var bytes = new byte[0x1000];
+        TestSynthesis.Write(bytes, 0x1100, [
+            0xE8, 0x7B, 0x00, 0x00, 0x00,
+            0x48, 0x8B, 0x05, 0x00, 0x01, 0x00, 0x00,
+            0xB8, 0x20, 0x00, 0x00, 0x00,
+            0xC3
+        ]);
+        TestSynthesis.Write(bytes, 0x1200, [
+            0xE8, 0x7B, 0x01, 0x00, 0x00,
+            0x48, 0x8B, 0x05, 0x00, 0x02, 0x00, 0x00,
+            0xB8, 0x28, 0x00, 0x00, 0x00,
+            0xC3
+        ]);
+        var context = TestSynthesis.Create(bytes, [
+            new RuntimeFunctionSpec(0x1100, 0x1112, 0x3000),
+            new RuntimeFunctionSpec(0x1200, 0x1212, 0x3004)
+        ]);
+
+        var proposal = context.Synthesizer.Synthesize(context.Image, new Rva(0x1100), null);
+
+        Assert.NotNull(proposal);
+        Assert.StartsWith("E8 ?? ?? ?? ?? 48 8B 05 ?? ?? ?? ?? B8 20", proposal.PatternText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Synthesize_MasksPreferredRangeImmediateButPreservesOrdinaryImmediate() {
+        var preferredBytes = new byte[0x1000];
+        TestSynthesis.Write(preferredBytes, 0x1100, [0x48, 0xB8, .. BitConverter.GetBytes(0x140001800UL), 0xC3]);
+        var preferred = TestSynthesis.Create(preferredBytes, [new RuntimeFunctionSpec(0x1100, 0x110B, 0x3000)]);
+        var ordinaryBytes = new byte[0x1000];
+        TestSynthesis.Write(ordinaryBytes, 0x1100, [0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3]);
+        var ordinary = TestSynthesis.Create(ordinaryBytes, [new RuntimeFunctionSpec(0x1100, 0x1106, 0x3000)]);
+
+        var preferredProposal = preferred.Synthesizer.Synthesize(preferred.Image, new Rva(0x1100), null);
+        var ordinaryProposal = ordinary.Synthesizer.Synthesize(ordinary.Image, new Rva(0x1100), null);
+
+        Assert.Equal("48 B8 ?? ?? ?? ?? ?? ?? ?? ??", preferredProposal!.PatternText);
+        Assert.Equal("B8 2A 00 00 00", ordinaryProposal!.PatternText);
+    }
+
+    [Fact]
+    public void Synthesize_TruncatedValidationScanRejectsProposal() {
+        var bytes = new byte[0x1000];
+        TestSynthesis.Write(bytes, 0x1100, [0x40, 0x53, 0xC3]);
+        TestSynthesis.Write(bytes, 0x1200, [0x40, 0x53, 0xC3]);
+        TestSynthesis.Write(bytes, 0x1300, [0x40, 0x53, 0xC3]);
+        var context = TestSynthesis.Create(bytes, [
+            new RuntimeFunctionSpec(0x1100, 0x1103, 0x3000),
+            new RuntimeFunctionSpec(0x1200, 0x1203, 0x3004),
+            new RuntimeFunctionSpec(0x1300, 0x1303, 0x3008)
+        ]);
+
+        var proposal = context.Synthesizer.Synthesize(context.Image, new Rva(0x1100), null);
+
+        Assert.Null(proposal);
+    }
+
+    [Fact]
+    public void Synthesize_RequiresUniquePatternWithinNinetySixBytes() {
+        var bytes = new byte[0x1000];
+        TestSynthesis.Write(bytes, 0x1100, [.. Enumerable.Repeat((byte)0x90, 96), 0xC3]);
+        TestSynthesis.Write(bytes, 0x1300, [.. Enumerable.Repeat((byte)0x90, 96), 0xCC]);
+        var context = TestSynthesis.Create(bytes, [
+            new RuntimeFunctionSpec(0x1100, 0x1161, 0x3000),
+            new RuntimeFunctionSpec(0x1300, 0x1361, 0x3004)
+        ]);
+
+        var proposal = context.Synthesizer.Synthesize(context.Image, new Rva(0x1100), null);
+
+        Assert.Null(proposal);
+    }
+
+    [Fact]
     public void RevalidateRecovered_ValidProposalRetainsRecoveredStatus() {
         var context = TestSynthesis.TwoFunctionsSharingFirstInstruction();
 
@@ -110,7 +184,7 @@ public class SignatureSynthesizerTests {
             ], firstInstructionLength: 2);
         }
 
-        private static TestSynthesisContext Create(byte[] bytes, RuntimeFunctionSpec[] functions, int firstInstructionLength) {
+        public static TestSynthesisContext Create(byte[] bytes, RuntimeFunctionSpec[] functions, int firstInstructionLength = 0) {
             using var fixture = SyntheticPeBuilder.Create()
                 .WithSection(".text", 0x1000, bytes, executable: true)
                 .WithRuntimeFunctions(functions)
@@ -127,7 +201,7 @@ public class SignatureSynthesizerTests {
             .. BitConverter.GetBytes(checked((int)(target - (callSite + 5))))
         ];
 
-        private static void Write(byte[] bytes, uint rva, byte[] value) =>
+        public static void Write(byte[] bytes, uint rva, byte[] value) =>
             value.CopyTo(bytes, checked((int)(rva - 0x1000)));
     }
 

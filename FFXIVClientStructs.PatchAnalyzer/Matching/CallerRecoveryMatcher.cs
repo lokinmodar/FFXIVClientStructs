@@ -168,7 +168,11 @@ public static class CallerRecoveryMatcher {
         if (targets.Length > 1)
             return With(directResult, SymbolStatus.Ambiguous, null, [], "Independent caller anchors resolve to different targets.");
         if (targets.Length == 1)
-            return With(directResult, SymbolStatus.CallerRecovered, targets[0], evidence.ToImmutable(), null);
+            return CandidateClassifier.RevalidateRecovered(
+                With(directResult, SymbolStatus.CallerRecovered, targets[0], evidence.ToImmutable(), null),
+                context.CurrentImage,
+                FunctionIndex.Build(context.CurrentImage),
+                context.Decoder);
         if (hasUnmatchedCurrentCall)
             return With(directResult, SymbolStatus.PossibleInlining, null, [], "Previous direct callers have no equivalent current direct call-site.");
         if (hasUnsupportedCaller)

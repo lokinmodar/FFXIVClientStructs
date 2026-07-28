@@ -13,27 +13,42 @@ namespace FFXIVClientStructs.PatchAnalyzer.Tests.Matching;
 
 public class CallerRecoveryMatcherTests {
     [Fact]
-    public void Recover_UniqueEquivalentCallSite_ReturnsNewTarget() {
+    public void Recover_UniqueEquivalentCallSite_WithoutProposalDowngradesToMissing() {
         var result = CallerRecoveryMatcher.Recover(
             TestRecovery.MissingDirectTarget(0x1500),
             TestGraphs.OldIncomingCall(0x1200, 0x1230, 0x1500),
             TestGraphs.CurrentIncomingCall(0x2200, 0x2230, 0x2800),
             TestRecovery.SignedCallerAnchor(0x1200, 0x2200));
 
-        Assert.Equal(SymbolStatus.CallerRecovered, result.Status);
-        Assert.Equal(new Rva(0x2800), result.CurrentTarget);
+        Assert.Equal(SymbolStatus.Missing, result.Status);
+        Assert.Null(result.CurrentTarget);
+        Assert.Single(result.RecoveryEvidence, evidence => evidence.CurrentTarget == new Rva(0x2800));
     }
 
     [Fact]
-    public void Recover_TwoStructurallyMappedCallersConverge_ReturnsTarget() {
+    public void Recover_UniqueCallerEvidence_RevalidatesThroughCallSiteProposal() {
+        var result = CallerRecoveryMatcher.Recover(
+            TestRecovery.MissingDirectTarget(0x1500),
+            TestGraphs.OldIncomingCall(0x1200, 0x1230, 0x1500),
+            TestGraphs.CurrentIncomingCall(0x2200, 0x2230, 0x2800),
+            TestRecovery.SignedCallerAnchor(0x1200, 0x2200, TestRecovery.CurrentImageWithAmbiguousTargetAndUniqueCall()));
+
+        Assert.Equal(SymbolStatus.CallerRecovered, result.Status);
+        Assert.Equal(new Rva(0x2800), result.CurrentTarget);
+        Assert.NotNull(result.SuggestedSignature);
+        Assert.Equal(new ushort[] { 1 }, result.SuggestedSignature.RelativeFollowOffsets);
+    }
+
+    [Fact]
+    public void Recover_TwoStructurallyMappedCallersConverge_WithoutProposalDowngradesToMissing() {
         var result = CallerRecoveryMatcher.Recover(
             TestRecovery.MissingDirectTarget(0x1500),
             TestGraphs.TwoOldCallersOf(0x1500),
             TestGraphs.TwoMappedCurrentCallersOf(0x2800),
             TestRecovery.StructuralCallerMatches(0x1200, 0x2200, 0x1300, 0x2300));
 
-        Assert.Equal(SymbolStatus.CallerRecovered, result.Status);
-        Assert.Equal(new Rva(0x2800), result.CurrentTarget);
+        Assert.Equal(SymbolStatus.Missing, result.Status);
+        Assert.Null(result.CurrentTarget);
         Assert.Equal(2, result.RecoveryEvidence.Length);
     }
 
@@ -69,7 +84,9 @@ public class CallerRecoveryMatcherTests {
             current,
             TestRecovery.TrustedDispatchContext());
 
-        Assert.Equal(new Rva(0x2800), result.CurrentTarget);
+        Assert.Equal(SymbolStatus.Missing, result.Status);
+        Assert.Null(result.CurrentTarget);
+        Assert.Single(result.RecoveryEvidence, evidence => evidence.CurrentTarget == new Rva(0x2800));
         Assert.DoesNotContain(new Rva(0x1230), Assert.Single(previous.Functions).ReachableInstructions);
         Assert.DoesNotContain(new Rva(0x2230), Assert.Single(current.Functions).ReachableInstructions);
     }
@@ -105,8 +122,9 @@ public class CallerRecoveryMatcherTests {
             TestGraphs.IncomingCallWithImagePointer(0x2200, 0x2230, 0x2800, pointer: 0x140002800),
             TestRecovery.SignedCallerAnchor(0x1200, 0x2200));
 
-        Assert.Equal(SymbolStatus.CallerRecovered, result.Status);
-        Assert.Equal(new Rva(0x2800), result.CurrentTarget);
+        Assert.Equal(SymbolStatus.Missing, result.Status);
+        Assert.Null(result.CurrentTarget);
+        Assert.Single(result.RecoveryEvidence, evidence => evidence.CurrentTarget == new Rva(0x2800));
     }
 
     [Fact]
@@ -153,14 +171,36 @@ public class CallerRecoveryMatcherTests {
             SymbolStatus.Missing,
             new SignatureScanResult([new SignatureMatch(new Rva(callSite), new Rva(target))], false, []));
 
-        public static CallerRecoveryContext SignedCallerAnchor(uint oldCaller, uint currentCaller) => Context(
+        public static CallerRecoveryContext SignedCallerAnchor(uint oldCaller, uint currentCaller, PeImage? currentImage = null) => Context(
             4,
             new Dictionary<Rva, FunctionMatchResult>(),
             new Dictionary<Rva, SymbolAnalysis> {
                 [new Rva(oldCaller)] = Analysis(oldCaller, LocationKind.Function, SymbolStatus.DirectUnique,
                     new SignatureScanResult([new SignatureMatch(new Rva(oldCaller), new Rva(oldCaller))], false, []),
                     new Rva(currentCaller))
-            });
+            }, currentImage: currentImage);
+
+        public static PeImage CurrentImageWithAmbiguousTargetAndUniqueCall() {
+            var bytes = new byte[0x2000];
+            var callOffset = checked((int)(0x2230 - 0x1000));
+            bytes[callOffset] = 0xE8;
+            BitConverter.GetBytes(checked((int)(0x2800 - 0x2235))).CopyTo(bytes, callOffset + 1);
+            bytes[0x1800] = 0x40;
+            bytes[0x1801] = 0x53;
+            bytes[0x1802] = 0xC3;
+            bytes[0x1900] = 0x40;
+            bytes[0x1901] = 0x53;
+            bytes[0x1902] = 0xC3;
+
+            using var fixture = SyntheticPeBuilder.Create()
+                .WithSection(".text", 0x1000, bytes, executable: true)
+                .WithRuntimeFunctions(
+                    new RuntimeFunctionSpec(0x2200, 0x2235, 0x3000),
+                    new RuntimeFunctionSpec(0x2800, 0x2803, 0x3004),
+                    new RuntimeFunctionSpec(0x2900, 0x2903, 0x3008))
+                .Write();
+            return PeImage.Open(fixture.ExecutablePath);
+        }
 
         public static CallerRecoveryContext StructuralCallerMatches(uint oldFirst, uint currentFirst, uint oldSecond, uint currentSecond) => Context(
             4,
