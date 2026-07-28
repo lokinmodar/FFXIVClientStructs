@@ -64,6 +64,7 @@ public class IcedInstructionDecoderTests {
     public void Decode_OpcodeKey_UsesRepositoryOwnedOperandKindNames() {
         var result = new IcedInstructionDecoder().Decode([0x48, 0x8B, 0x05, 0x10, 0, 0, 0], new Rva(0x2000));
 
+        Assert.True(result.Success);
         Assert.Equal("Mov_Register_Memory", result.Instruction!.OpcodeKey);
     }
 
@@ -78,6 +79,11 @@ public class IcedInstructionDecoderTests {
         foreach (var type in contractTypes) {
             foreach (var property in type.GetProperties(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public))
                 Assert.False(IsIcedType(property.PropertyType), $"{type.FullName}.{property.Name} exposes {property.PropertyType.FullName}.");
+
+            foreach (var constructor in type.GetConstructors(BindingFlags.Instance | BindingFlags.Public)) {
+                foreach (var parameter in constructor.GetParameters())
+                    Assert.False(IsIcedType(parameter.ParameterType), $"{type.FullName} constructor accepts {parameter.ParameterType.FullName}.");
+            }
 
             foreach (var method in type.GetMethods(BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.DeclaredOnly)) {
                 Assert.False(IsIcedType(method.ReturnType), $"{type.FullName}.{method.Name} returns {method.ReturnType.FullName}.");
