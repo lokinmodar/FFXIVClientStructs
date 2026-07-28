@@ -94,3 +94,39 @@ The test project retains its pre-existing nullable warnings in `FFXIVClientStruc
 - The decoder probe runs after PE/index validation and before inventory loading/output-directory creation, preserving the required preflight ordering.
 - The graph-failure test uses a decoder that passes the exact preflight probe but throws while decoding an indexed function, which verifies the separate fatal failed-report path through production orchestration.
 - Changes remain limited to the requested application, integration tests, and the required report; `Program.cs` did not require a supporting change.
+
+## Fix Round 2
+
+### Findings Addressed
+
+- Tightened the decoder preflight probe to require the exact one-byte `C3` `Ret` decode shape: matching RVA and bytes, `Ret` opcode key, return flow control, no branch or IP-relative target, and no encoded constants.
+- Replaced terminal status aggregation derived directly from the result list with an inventory-indexed count across every defined `SymbolStatus`. An undefined status is excluded from that domain and therefore cannot account for the full inventory total.
+- Added focused integration coverage for a decoder that claims successful decoding but returns a non-RET shape; the run must return `InvalidInput` before creating the output directory.
+
+### TDD Evidence
+
+Focused red command:
+
+```powershell
+dotnet test .\FFXIVClientStructs.PatchAnalyzer.Tests\FFXIVClientStructs.PatchAnalyzer.Tests.csproj --filter FullyQualifiedName~PatchAnalyzerApplicationTests --no-restore
+```
+
+Result before the production fix: `RunAsync_DecoderPreflightDecodesNonRet_ReturnsInvalidInputWithoutOutputDirectory` expected `InvalidInput` but received `Success`, proving the preflight accepted a successful non-RET decode.
+
+Final focused verification used the same command: `5` passed, `0` failed, duration `200 ms`.
+
+Full analyzer-project verification:
+
+```powershell
+dotnet test .\FFXIVClientStructs.PatchAnalyzer.Tests\FFXIVClientStructs.PatchAnalyzer.Tests.csproj --no-restore
+```
+
+Result: `126` passed, `0` failed, duration `623 ms`.
+
+The existing .NET preview SDK notices and nullable warnings in `FFXIVClientStructs.PatchAnalyzer.Tests/Data/SignatureCorrelatorTests.cs` remain outside this fix round's scope.
+
+### Review
+
+- The decoder probe remains in the approved preflight location after PE/index validation and before inventory loading/output creation.
+- Exact inventory-name matching and the existing failed-report integration coverage remain unchanged.
+- Changes are limited to `PatchAnalyzerApplication`, `PatchAnalyzerApplicationTests`, and this report.

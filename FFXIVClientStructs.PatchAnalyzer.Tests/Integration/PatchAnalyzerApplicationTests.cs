@@ -43,6 +43,16 @@ public class PatchAnalyzerApplicationTests {
     }
 
     [Fact]
+    public async Task RunAsync_DecoderPreflightDecodesNonRet_ReturnsInvalidInputWithoutOutputDirectory() {
+        using var fixture = TestPatchPair.DirectUnique(new NonRetInstructionDecoder());
+
+        var exitCode = await fixture.Application.RunAsync(fixture.Options, CancellationToken.None);
+
+        Assert.Equal(ExitCode.InvalidInput, exitCode);
+        Assert.False(Directory.Exists(fixture.OutputDirectory));
+    }
+
+    [Fact]
     public async Task RunAsync_DecoderFailsAfterPreflight_WritesFailedReportWithoutCandidateYaml() {
         using var fixture = TestPatchPair.WithRuntimeFunctions(new GraphFailingInstructionDecoder());
 
@@ -124,6 +134,20 @@ public class PatchAnalyzerApplicationTests {
     private sealed class ThrowingInstructionDecoder : IInstructionDecoder {
         public DecodeResult Decode(ReadOnlySpan<byte> bytes, Rva instructionRva) =>
             throw new InvalidOperationException("Decoder preflight failed.");
+    }
+
+    private sealed class NonRetInstructionDecoder : IInstructionDecoder {
+        public DecodeResult Decode(ReadOnlySpan<byte> bytes, Rva instructionRva) => new(
+            true,
+            new DecodedInstruction(
+                instructionRva,
+                [0xC3],
+                "Nop",
+                FlowControlKind.Next,
+                null,
+                null,
+                []),
+            null);
     }
 
     private sealed class GraphFailingInstructionDecoder : IInstructionDecoder {

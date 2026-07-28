@@ -353,11 +353,13 @@ public sealed class PatchAnalyzerApplication {
         if (!analysisNames.SetEquals(inventoryNames))
             throw new InvalidOperationException("The terminal analysis names do not match the loaded inventory.");
 
-        var statusCounts = symbols
-            .GroupBy(symbol => symbol.Status)
-            .ToDictionary(group => group.Key, group => group.Count());
-        if (statusCounts.Keys.Any(status => !Enum.IsDefined(status)) ||
-            statusCounts.Values.Sum() != inventoryNames.Count)
+        var analysesByName = symbols.ToDictionary(symbol => symbol.GeneratedName, StringComparer.Ordinal);
+        var statusCounts = Enum.GetValues<SymbolStatus>()
+            .ToDictionary(
+                status => status,
+                status => inventory.Count(signature => analysesByName[signature.GeneratedName].Status == status));
+        if (symbols.Any(symbol => !Enum.IsDefined(symbol.Status)) ||
+            statusCounts.Values.Sum() != inventory.Length)
             throw new InvalidOperationException("The terminal symbol status counts do not sum to the inventory count.");
     }
 
@@ -365,7 +367,11 @@ public sealed class PatchAnalyzerApplication {
         var probeRva = new Rva(0);
         var result = instructionDecoder.Decode(new byte[] { 0xC3 }, probeRva);
         if (!result.Success || result.Instruction is not { } instruction ||
-            instruction.Rva != probeRva || instruction.Bytes.IsEmpty || instruction.Bytes.Length > 1)
+            instruction.Rva != probeRva || !instruction.Bytes.SequenceEqual(new byte[] { 0xC3 }) ||
+            !string.Equals(instruction.OpcodeKey, "Ret", StringComparison.Ordinal) ||
+            instruction.FlowControl != FlowControlKind.Return ||
+            instruction.NearBranchTarget is not null || instruction.IpRelativeTarget is not null ||
+            !instruction.Constants.IsEmpty)
             throw new InvalidDataException($"The instruction decoder failed its preflight probe: {result.Error ?? "invalid decoded instruction."}");
     }
 
