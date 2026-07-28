@@ -387,9 +387,11 @@ Top-level information:
 - tool and repository version;
 - binary identities and version sources;
 - analysis configuration;
-- stage timings;
+- deterministic workload counts by stage;
 - counts by status;
 - artifact paths relative to the output directory.
+
+Elapsed stage timings are written to the operator console only. They are deliberately excluded from `report.json` so identical inputs and configuration produce byte-identical review artifacts.
 
 Per-symbol information:
 
@@ -475,7 +477,7 @@ When an operator has both builds locally, the runbook may include a non-CI smoke
 
 ### Performance
 
-Every stage records elapsed time and the number of bytes, instructions, patterns, and graph edges processed.
+Every stage measures elapsed time for the operator console and records deterministic counts of bytes, instructions, patterns, and graph edges in `report.json`.
 
 The initial non-CI goal on a documented reference machine is:
 
