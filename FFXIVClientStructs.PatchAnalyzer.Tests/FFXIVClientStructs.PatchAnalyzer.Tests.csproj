@@ -15,5 +15,6 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\FFXIVClientStructs.PatchAnalyzer\FFXIVClientStructs.PatchAnalyzer.csproj" />
+    <ProjectReference Include="..\FFXIVClientStructs\FFXIVClientStructs.csproj" />
   </ItemGroup>
 </Project>
