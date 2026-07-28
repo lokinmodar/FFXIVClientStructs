@@ -63,6 +63,8 @@ public static class SignatureCorrelator {
 
         if (candidates.Length == 0)
             return new SignatureCatalogEntry(signature, DataCorrelationStatus.Missing, null, $"No {kind} entry matches '{nativeName}'.");
+        if ((kind == LocationKind.Instance || kind == LocationKind.VirtualTable) && candidates.Select(location => location.SourceSpan).Distinct().Count() == candidates.Length)
+            return new SignatureCatalogEntry(signature, DataCorrelationStatus.Matched, candidates[0], null);
         if (candidates.Length != 1 || candidates.Select(location => location.SourceSpan).Distinct().Count() != 1)
             return new SignatureCatalogEntry(signature, DataCorrelationStatus.Ambiguous, null, $"Multiple data.yml entries match '{nativeName}'.");
 

@@ -102,4 +102,39 @@ public class SignatureCorrelatorTests {
             "0x140001000",
             yaml.AsSpan(entry.Location!.SourceSpan.Start, entry.Location.SourceSpan.Length).ToString());
     }
+
+    [Fact]
+    public void Correlate_MultipleInstancesAndVirtualTables_UsesThePrimaryEntries() {
+        const string yaml = """
+                            version: 1
+                            globals: {}
+                            functions: {}
+                            classes:
+                                Client::Game::Thing:
+                                    instances:
+                                        - ea: 0x142000100
+                                        - ea: 0x142000200
+                                    vtbls:
+                                        - ea: 0x142000300
+                                        - ea: 0x142000400
+                            """;
+
+        var entries = SignatureCorrelator.Correlate([
+            SignatureDefinition.Parse("FFXIVClientStructs.FFXIV.Client.Game.Thing.Instance", "48 8B", []),
+            SignatureDefinition.Parse("FFXIVClientStructs.FFXIV.Client.Game.Thing.StaticVirtualTable", "48 8D", [])
+        ], DataCatalog.Parse(yaml, 0x140000000));
+
+        Assert.Equal(new Rva(0x2000100), entries[0].Location!.Rva);
+        Assert.Equal(new Rva(0x2000300), entries[1].Location!.Rva);
+    }
+
+    [Theory]
+    [InlineData("version: []\nglobals: {}\nfunctions: {}\nclasses: {}\n")]
+    [InlineData("version: 1\nglobals: []\nfunctions: {}\nclasses: {}\n")]
+    [InlineData("version: 1\nglobals: {}\nfunctions: {}\nclasses:\n  Client::Game::Thing:\n    funcs: []\n")]
+    [InlineData("version: 1\nglobals: {}\nfunctions: {}\nclasses:\n  Client::Game::Thing:\n    instances: {}\n")]
+    [InlineData("version: 1\nglobals: {}\nfunctions: {}\nclasses:\n  Client::Game::Thing:\n    vtbls:\n      - ea: {}\n")]
+    public void Parse_InvalidSemanticShape_ThrowsFormatException(string yaml) {
+        Assert.Throws<FormatException>(() => DataCatalog.Parse(yaml, 0x140000000));
+    }
 }

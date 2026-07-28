@@ -22,9 +22,14 @@ internal sealed class DataSourceMap {
 
     public static DataSourceMap Scan(string sourceText, ulong imageBase) {
         var locations = ImmutableArray.CreateBuilder<DataLocation>();
+        var rootIndent = -1;
         var section = string.Empty;
+        var sectionContentIndent = -1;
         var className = string.Empty;
+        var classIndent = -1;
         var classSection = string.Empty;
+        var classSectionIndent = -1;
+        var classContentIndent = -1;
         var version = string.Empty;
         var versionSpan = new SourceSpan(0, 0);
         var position = 0;
@@ -35,34 +40,62 @@ internal sealed class DataSourceMap {
             var entry = EntryAddress.Match(line);
 
             if (section == "classes" && !string.IsNullOrEmpty(className) && (classSection == "instances" || classSection == "vtbls") && entry.Success) {
-                var address = entry.Groups["address"].Value;
-                AddLocation(locations, address, className, classSection == "instances" ? LocationKind.Instance : LocationKind.VirtualTable, position, rawLine, imageBase);
+                var indent = entry.Groups["indent"].Length;
+                if (classContentIndent < 0)
+                    classContentIndent = indent;
+                if (indent == classContentIndent) {
+                    var address = entry.Groups["address"].Value;
+                    AddLocation(locations, address, className, classSection == "instances" ? LocationKind.Instance : LocationKind.VirtualTable, position, rawLine, imageBase);
+                }
             } else if (mapping.Success) {
                 var indent = mapping.Groups["indent"].Length;
                 var key = mapping.Groups["key"].Value.Trim();
                 var value = mapping.Groups["value"].Value.Trim();
 
-                if (indent == 0) {
+                if (rootIndent < 0)
+                    rootIndent = indent;
+
+                if (indent == rootIndent) {
                     section = key;
+                    sectionContentIndent = -1;
                     className = string.Empty;
+                    classIndent = -1;
                     classSection = string.Empty;
+                    classSectionIndent = -1;
+                    classContentIndent = -1;
                     if (key == "version") {
                         version = value;
                         var valueStart = rawLine.IndexOf(value, StringComparison.Ordinal);
                         versionSpan = new SourceSpan(position + valueStart, value.Length);
                     }
-                } else if (section == "classes" && indent == 2 && string.IsNullOrEmpty(value)) {
-                    className = key;
-                    classSection = string.Empty;
-                } else if (section == "classes" && indent == 4 && (key == "funcs" || key == "instances" || key == "vtbls")) {
-                    classSection = key;
-                } else if ((section == "globals" || section == "functions") && indent == 2) {
-                    AddLocation(locations, key, value, section == "globals" ? LocationKind.Global : LocationKind.Function, position, rawLine, imageBase);
-                } else if (section == "classes" && classSection == "funcs" && indent == 6) {
-                    AddLocation(locations, key, $"{className}::{value}", LocationKind.Function, position, rawLine, imageBase);
+                } else if ((section == "globals" || section == "functions")) {
+                    if (sectionContentIndent < 0)
+                        sectionContentIndent = indent;
+                    if (indent == sectionContentIndent)
+                        AddLocation(locations, key, value, section == "globals" ? LocationKind.Global : LocationKind.Function, position, rawLine, imageBase);
+                } else if (section == "classes" && string.IsNullOrEmpty(value)) {
+                    if (classIndent < 0)
+                        classIndent = indent;
+                    if (indent == classIndent) {
+                        className = key;
+                        classSection = string.Empty;
+                        classSectionIndent = -1;
+                        classContentIndent = -1;
+                    } else if (!string.IsNullOrEmpty(className) && (key == "funcs" || key == "instances" || key == "vtbls")) {
+                        if (classSectionIndent < 0)
+                            classSectionIndent = indent;
+                        if (indent == classSectionIndent) {
+                            classSection = key;
+                            classContentIndent = -1;
+                        }
+                    }
+                } else if (section == "classes" && classSection == "funcs") {
+                    if (classContentIndent < 0)
+                        classContentIndent = indent;
+                    if (indent == classContentIndent)
+                        AddLocation(locations, key, $"{className}::{value}", LocationKind.Function, position, rawLine, imageBase);
                 }
             }
-
             position += rawLine.Length;
             if (position < sourceText.Length && sourceText[position] == '\r')
                 position++;
