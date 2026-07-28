@@ -73,3 +73,38 @@ node .\ida\data-validator.js
 ## Concerns
 
 The solution build continues to report four pre-existing nullable warnings in `SignatureCorrelatorTests.cs`; this fix wave does not modify those lines. No new warning or unresolved functional concern was identified.
+
+## Final Review Fix Round 2
+
+### Scope
+
+- Rejected whole-function matches now retain structural recovery evidence, including the fingerprint inputs and deterministically ordered considered candidates with rejection reasons.
+- Caller recovery preserves evidence produced by direct structural recovery instead of replacing it when subsequent caller recovery also fails.
+- A trusted call-site whose previous address has no indexed enclosing function now emits rejected trusted-seed evidence while preserving the symbol's existing status.
+- The current-image-base rendering, report schema additions, match limit, runtime Resolver behavior, and acceptance rules are unchanged.
+
+### TDD Evidence
+
+The two amended integration tests were run before the production changes. Both failed because the ambiguous symbols exposed no recovery evidence:
+
+```powershell
+dotnet test .\FFXIVClientStructs.PatchAnalyzer.Tests\FFXIVClientStructs.PatchAnalyzer.Tests.csproj --filter "FullyQualifiedName~PatchAnalyzerApplicationTests.RunAsync_RepeatedSmallFunctionIdentity_RemainsAmbiguous|FullyQualifiedName~PatchAnalyzerApplicationTests.RunAsync_TwoEquivalentCurrentAnchors_RemainsAmbiguous" --no-restore
+```
+
+After implementation, both tests passed. The repeated-function test verifies rejected structural fingerprint inputs, both considered candidates, and their rejection reasons. The no-containing-function test verifies rejected trusted-call-site evidence and its reason.
+
+### Verification
+
+```text
+Focused ArtifactWriter, CallerRecoveryMatcher, and PatchAnalyzerApplication tests
+  42 passed, 0 failed
+
+Full FFXIVClientStructs.PatchAnalyzer.Tests project
+  138 passed, 0 failed
+```
+
+The final formatter and diff checks passed. No real-binary dependency or generated analysis artifact was added.
+
+### Concerns
+
+The PatchAnalyzer tests continue to report four pre-existing nullable warnings in `SignatureCorrelatorTests.cs`. No new warning or unresolved functional concern was identified.

@@ -54,7 +54,12 @@ public class PatchAnalyzerApplicationTests {
 
         var result = await RunSucceededAsync(fixture);
 
-        AssertStatus(result, "FFXIVClientStructs.FFXIV.Test.Wrapper", SymbolStatus.Ambiguous);
+        var symbol = AssertStatus(result, "FFXIVClientStructs.FFXIV.Test.Wrapper", SymbolStatus.Ambiguous);
+        var evidence = Assert.Single(symbol.RecoveryEvidence, item => item.AnchorKind == "StructuralFunction");
+        Assert.False(evidence.Accepted);
+        Assert.NotEmpty(evidence.FingerprintInputs);
+        Assert.Equal(2, evidence.ConsideredCandidates.Length);
+        Assert.All(evidence.ConsideredCandidates, candidate => Assert.NotNull(candidate.RejectionReason));
     }
 
     [Fact]
@@ -63,7 +68,11 @@ public class PatchAnalyzerApplicationTests {
 
         var result = await RunSucceededAsync(fixture);
 
-        AssertStatus(result, "FFXIVClientStructs.FFXIV.Test.Anchor", SymbolStatus.Ambiguous);
+        var symbol = AssertStatus(result, "FFXIVClientStructs.FFXIV.Test.Anchor", SymbolStatus.Ambiguous);
+        var evidence = Assert.Single(symbol.RecoveryEvidence, item => item.AnchorKind == "TrustedCallSite");
+        Assert.False(evidence.Accepted);
+        Assert.Equal(0x1000u, evidence.PreviousCallSiteRva);
+        Assert.Contains("enclosing function", evidence.RejectionReason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

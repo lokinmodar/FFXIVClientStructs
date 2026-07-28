@@ -231,38 +231,44 @@ public sealed class PatchAnalyzerApplication {
         if (analysis.Status is not (SymbolStatus.Missing or SymbolStatus.Ambiguous) ||
             analysis.LocationKind != LocationKind.Function ||
             analysis.PreviousDataRva is not { } previousTarget ||
-            !functionMatches.TryGetValue(previousTarget, out var match) ||
-            match.Status != SymbolStatus.StructuralRecovered ||
-            match.CurrentTarget is not { } currentTarget)
+            !functionMatches.TryGetValue(previousTarget, out var match))
             return analysis;
+
+        var currentTarget = match.Status == SymbolStatus.StructuralRecovered
+            ? match.CurrentTarget
+            : null;
+        var accepted = currentTarget is not null;
+        var evidence = new RecoveryEvidence(
+            "StructuralFunction",
+            accepted,
+            previousTarget,
+            currentTarget,
+            null,
+            null,
+            null,
+            null,
+            match.PreviousFingerprint.Sha256,
+            match.PreviousFingerprint.BasicBlockKeys,
+            match.Candidates
+                .OrderBy(candidate => candidate.Rank)
+                .ThenBy(candidate => candidate.CurrentTarget.Value)
+                .Select(candidate => new RecoveryCandidateEvidence(
+                    candidate.CurrentTarget,
+                    null,
+                    null,
+                    candidate.Exact,
+                    candidate.Rank,
+                    candidate.FingerprintSha256,
+                    candidate.RejectionReason))
+                .ToImmutableArray(),
+            accepted ? null : "Whole-function matching did not produce a unique exact current target.");
+        if (!accepted)
+            return analysis with { RecoveryEvidence = [.. analysis.RecoveryEvidence, evidence] };
 
         var recovered = analysis with {
             Status = SymbolStatus.StructuralRecovered,
             CurrentTarget = currentTarget,
-            RecoveryEvidence = [new RecoveryEvidence(
-                "StructuralFunction",
-                true,
-                previousTarget,
-                currentTarget,
-                null,
-                null,
-                null,
-                null,
-                match.PreviousFingerprint.Sha256,
-                match.PreviousFingerprint.BasicBlockKeys,
-                match.Candidates
-                    .OrderBy(candidate => candidate.Rank)
-                    .ThenBy(candidate => candidate.CurrentTarget.Value)
-                    .Select(candidate => new RecoveryCandidateEvidence(
-                        candidate.CurrentTarget,
-                        null,
-                        null,
-                        candidate.Exact,
-                        candidate.Rank,
-                        candidate.FingerprintSha256,
-                        candidate.RejectionReason))
-                    .ToImmutableArray(),
-                null)],
+            RecoveryEvidence = [.. analysis.RecoveryEvidence, evidence],
             Diagnostics = analysis.Diagnostics
         };
         return CandidateClassifier.RevalidateRecovered(recovered, currentImage, currentFunctions, decoder);

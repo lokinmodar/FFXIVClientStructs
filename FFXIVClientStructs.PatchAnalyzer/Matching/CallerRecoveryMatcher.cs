@@ -88,6 +88,7 @@ public static class CallerRecoveryMatcher {
             .ThenBy(edge => edge.Kind)
             .ToImmutableArray();
         var evidence = ImmutableArray.CreateBuilder<RecoveryEvidence>();
+        evidence.AddRange(directResult.RecoveryEvidence);
         var hasNonAcceptingCallerMapping = false;
         var hasUnsupportedCaller = false;
         var hasUnmatchedCurrentCall = false;
@@ -347,7 +348,12 @@ public static class CallerRecoveryMatcher {
         var previousCallSite = directResult.PreviousScan.Matches[0].PatternRva;
         var previousFunction = FindContainingFunction(previous, previousCallSite);
         if (previousFunction is null)
-            return default;
+            return new TrustedSeedResult(
+                RejectedAnchor("TrustedCallSite", previousTarget, null, previousCallSite, null, "The previous call-site has no indexed enclosing function."),
+                false,
+                false,
+                false,
+                false);
         if (previousFunction.IsSuspect)
             return new TrustedSeedResult(
                 RejectedAnchor("TrustedCallSite", previousTarget, previousFunction.Range.Begin, previousCallSite, null, "The previous enclosing function is suspect."),
