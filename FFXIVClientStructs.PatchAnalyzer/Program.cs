@@ -1,4 +1,11 @@
 using FFXIVClientStructs.PatchAnalyzer.Cli;
+using FFXIVClientStructs.PatchAnalyzer.Analysis;
+
+using var cancellation = new CancellationTokenSource();
+Console.CancelKeyPress += (_, eventArgs) => {
+    eventArgs.Cancel = true;
+    cancellation.Cancel();
+};
 
 var result = CommandLine.Parse(args);
 if (!result.IsSuccess) {
@@ -7,4 +14,5 @@ if (!result.IsSuccess) {
     return (int)ExitCode.InvalidInput;
 }
 
-return (int)ExitCode.Success;
+return (int)await PatchAnalyzerApplication.CreateDefault()
+    .RunAsync(result.Options!, cancellation.Token);
