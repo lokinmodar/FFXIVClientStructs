@@ -46,7 +46,7 @@ public sealed class PatchAnalyzerApplication {
             var validatedPreflight = preflight!;
             Directory.CreateDirectory(validatedPreflight.OutputDirectory);
             var result = RunPipeline(validatedPreflight, symbols, stageMilliseconds, cancellationToken, out symbols);
-            ValidateTerminalSymbols(result.Symbols, validatedPreflight.Signatures.Length);
+            ValidateTerminalSymbols(result.Symbols, validatedPreflight.Signatures);
 
             cancellationToken.ThrowIfCancellationRequested();
             ReportWriter.Write(result, Path.Combine(validatedPreflight.OutputDirectory, "report.json"), cancellationToken);
@@ -97,6 +97,7 @@ public sealed class PatchAnalyzerApplication {
 
             var previousFunctions = FunctionIndex.Build(previousImage);
             var currentFunctions = FunctionIndex.Build(currentImage);
+            ValidateDecoderPreflight();
             var signatures = signatureInventory.Load();
             if (signatures.IsDefault)
                 throw new InvalidDataException("The generated signature inventory was not initialized.");
@@ -338,13 +339,34 @@ public sealed class PatchAnalyzerApplication {
             ["current_direct_calls"] = currentGraph?.DirectCalls.Length ?? 0
         }.ToImmutableSortedDictionary(StringComparer.Ordinal);
 
-    private static void ValidateTerminalSymbols(ImmutableArray<SymbolAnalysis> symbols, int expectedCount) {
-        if (symbols.Length != expectedCount)
+    private static void ValidateTerminalSymbols(
+        ImmutableArray<SymbolAnalysis> symbols,
+        ImmutableArray<SignatureDefinition> inventory) {
+        var inventoryNames = inventory
+            .Select(signature => signature.GeneratedName)
+            .ToImmutableHashSet(StringComparer.Ordinal);
+        var analysisNames = symbols
+            .Select(symbol => symbol.GeneratedName)
+            .ToImmutableHashSet(StringComparer.Ordinal);
+        if (symbols.Length != inventory.Length || inventoryNames.Count != inventory.Length)
             throw new InvalidOperationException("The pipeline did not produce one terminal analysis for every inventory entry.");
-        if (symbols.Select(symbol => symbol.GeneratedName).Distinct(StringComparer.Ordinal).Count() != expectedCount)
-            throw new InvalidOperationException("The pipeline produced duplicate symbol analyses.");
-        if (symbols.GroupBy(symbol => symbol.Status).Sum(group => group.Count()) != expectedCount)
+        if (!analysisNames.SetEquals(inventoryNames))
+            throw new InvalidOperationException("The terminal analysis names do not match the loaded inventory.");
+
+        var statusCounts = symbols
+            .GroupBy(symbol => symbol.Status)
+            .ToDictionary(group => group.Key, group => group.Count());
+        if (statusCounts.Keys.Any(status => !Enum.IsDefined(status)) ||
+            statusCounts.Values.Sum() != inventoryNames.Count)
             throw new InvalidOperationException("The terminal symbol status counts do not sum to the inventory count.");
+    }
+
+    private void ValidateDecoderPreflight() {
+        var probeRva = new Rva(0);
+        var result = instructionDecoder.Decode(new byte[] { 0xC3 }, probeRva);
+        if (!result.Success || result.Instruction is not { } instruction ||
+            instruction.Rva != probeRva || instruction.Bytes.IsEmpty || instruction.Bytes.Length > 1)
+            throw new InvalidDataException($"The instruction decoder failed its preflight probe: {result.Error ?? "invalid decoded instruction."}");
     }
 
     private static void TryWriteFailedReport(PatchAnalysisResult result, string outputDirectory) {
