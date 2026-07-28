@@ -1,6 +1,7 @@
 using FFXIVClientStructs.PatchAnalyzer.Binary;
 using FFXIVClientStructs.PatchAnalyzer.Data;
 using FFXIVClientStructs.PatchAnalyzer.Signatures;
+using YamlDotNet.Core;
 using Xunit;
 
 namespace FFXIVClientStructs.PatchAnalyzer.Tests.Data;
@@ -154,6 +155,25 @@ public class SignatureCorrelatorTests {
 
         Assert.All(entries, entry => Assert.Equal(DataCorrelationStatus.Ambiguous, entry.CorrelationStatus));
         Assert.All(entries, entry => Assert.Null(entry.Location));
+    }
+
+    [Fact]
+    public void Parse_DuplicateClassAndUnrelatedDuplicateKey_ThrowsYamlException() {
+        const string yaml = """
+                            version: 1
+                            globals: {}
+                            functions: {}
+                            classes:
+                              Client::Game::Thing:
+                                instances:
+                                  - ea: 0x142000100
+                              Client::Game::Thing:
+                                instances:
+                                  - ea: 0x142000200
+                            globals: {}
+                            """;
+
+        Assert.Throws<YamlException>(() => DataCatalog.Parse(yaml, 0x140000000));
     }
 
     [Theory]
