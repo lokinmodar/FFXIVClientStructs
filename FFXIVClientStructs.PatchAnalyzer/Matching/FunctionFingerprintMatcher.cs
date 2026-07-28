@@ -20,7 +20,8 @@ public sealed record FunctionMatchCandidate(
     Rva CurrentTarget,
     bool Exact,
     int Rank,
-    string FingerprintSha256);
+    string FingerprintSha256,
+    string? RejectionReason);
 
 /// <summary>Describes the result of matching one previous function against current functions.</summary>
 public sealed record FunctionMatchResult(
@@ -59,44 +60,39 @@ public static class FunctionFingerprintMatcher {
         var previousFingerprint = Create(previous);
         var candidates = current.Functions
             .OrderBy(function => function.Range.Begin.Value)
-            .Select(function => new Candidate(function.Range.Begin, Create(function)))
+            .Select(function => new Candidate(function.Range.Begin, function.IsSuspect, Create(function)))
             .ToImmutableArray();
-        var exactTargets = candidates.Where(candidate => candidate.Fingerprint.Sha256 == previousFingerprint.Sha256).ToImmutableArray();
-
-        if (exactTargets.Length == 1) {
-            var match = exactTargets[0];
-            return new FunctionMatchResult(
-                SymbolStatus.StructuralRecovered,
-                match.Target,
-                previousFingerprint,
-                [new FunctionMatchCandidate(match.Target, true, 1, match.Fingerprint.Sha256)]);
-        }
-
-        if (exactTargets.Length > 1) {
-            var diagnostics = exactTargets
-                .OrderBy(candidate => candidate.Target.Value)
-                .Select((candidate, index) => new FunctionMatchCandidate(candidate.Target, true, index + 1, candidate.Fingerprint.Sha256))
-                .ToImmutableArray();
-            return new FunctionMatchResult(SymbolStatus.Ambiguous, null, previousFingerprint, diagnostics);
-        }
-
-        var ranked = candidates
-            .Select(candidate => new { Candidate = candidate, Score = SimilarityScore(previousFingerprint, candidate.Fingerprint) })
-            .Where(entry => entry.Score > 0)
-            .OrderByDescending(entry => entry.Score)
+        var exactTargets = candidates
+            .Where(candidate => !candidate.IsSuspect && candidate.Fingerprint.Sha256 == previousFingerprint.Sha256)
+            .ToImmutableArray();
+        Rva? currentTarget = exactTargets.Length == 1 ? exactTargets[0].Target : null;
+        var status = currentTarget is not null
+            ? SymbolStatus.StructuralRecovered
+            : candidates.Any(candidate => !candidate.IsSuspect && SimilarityScore(previousFingerprint, candidate.Fingerprint) > 0)
+                ? SymbolStatus.Ambiguous
+                : SymbolStatus.Missing;
+        var diagnostics = candidates
+            .Select(candidate => new {
+                Candidate = candidate,
+                Exact = candidate.Fingerprint.Sha256 == previousFingerprint.Sha256,
+                Score = SimilarityScore(previousFingerprint, candidate.Fingerprint)
+            })
+            .OrderByDescending(entry => entry.Exact)
+            .ThenByDescending(entry => entry.Score)
             .ThenBy(entry => entry.Candidate.Target.Value)
             .Select((entry, index) => new FunctionMatchCandidate(
                 entry.Candidate.Target,
-                false,
+                entry.Exact,
                 index + 1,
-                entry.Candidate.Fingerprint.Sha256))
+                entry.Candidate.Fingerprint.Sha256,
+                RejectionReason(entry.Candidate, entry.Exact, entry.Score, currentTarget)))
             .ToImmutableArray();
 
         return new FunctionMatchResult(
-            ranked.IsEmpty ? SymbolStatus.Missing : SymbolStatus.Ambiguous,
-            null,
+            status,
+            currentTarget,
             previousFingerprint,
-            ranked);
+            diagnostics);
     }
 
     private static ImmutableArray<BasicBlock> BuildBlocks(ImmutableArray<DecodedInstruction> instructions) {
@@ -219,7 +215,21 @@ public static class FunctionFingerprintMatcher {
         return commonBlocks * 100 - instructionDelta * 10 - edgeDelta;
     }
 
-    private sealed record Candidate(Rva Target, FunctionFingerprint Fingerprint);
+    private static string? RejectionReason(Candidate candidate, bool exact, int score, Rva? currentTarget) {
+        if (candidate.IsSuspect)
+            return "The current function graph is suspect.";
+        if (currentTarget == candidate.Target)
+            return null;
+        if (exact)
+            return "The exact fingerprint is not unique.";
+        if (currentTarget is not null)
+            return "A unique exact fingerprint match was selected.";
+        return score > 0
+            ? "The fingerprint does not exactly match the previous function."
+            : "The function has no structural similarity to the previous function.";
+    }
+
+    private sealed record Candidate(Rva Target, bool IsSuspect, FunctionFingerprint Fingerprint);
 
     private sealed record BasicBlock(int Index, ImmutableArray<DecodedInstruction> Instructions, ImmutableArray<BlockSuccessor> Successors);
 

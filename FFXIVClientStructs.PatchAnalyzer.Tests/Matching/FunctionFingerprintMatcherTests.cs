@@ -17,6 +17,10 @@ public class FunctionFingerprintMatcherTests {
 
         Assert.Equal(SymbolStatus.StructuralRecovered, result.Status);
         Assert.Equal(new Rva(0x2800), result.CurrentTarget);
+        Assert.Equal(2, result.Candidates.Length);
+        Assert.Contains(result.Candidates, candidate =>
+            candidate.CurrentTarget == new Rva(0x3000) &&
+            candidate.RejectionReason == "A unique exact fingerprint match was selected.");
     }
 
     [Fact]
@@ -72,6 +76,30 @@ public class FunctionFingerprintMatcherTests {
             result.Candidates);
     }
 
+    [Fact]
+    public void Match_SuspectExactFunction_DoesNotRecoverAndRecordsRejection() {
+        var result = FunctionFingerprintMatcher.Match(
+            TestFunctions.PreviousTarget(),
+            TestFunctions.CurrentSuspectExactTarget());
+
+        var candidate = Assert.Single(result.Candidates);
+        Assert.NotEqual(SymbolStatus.StructuralRecovered, result.Status);
+        Assert.True(candidate.Exact);
+        Assert.Equal("The current function graph is suspect.", candidate.RejectionReason);
+    }
+
+    [Fact]
+    public void Match_RetainsZeroScoreCandidateWithRejectionReason() {
+        var result = FunctionFingerprintMatcher.Match(
+            TestFunctions.PreviousTarget(),
+            TestFunctions.CurrentUnrelatedFunction());
+
+        var candidate = Assert.Single(result.Candidates);
+        Assert.Equal(SymbolStatus.Missing, result.Status);
+        Assert.False(candidate.Exact);
+        Assert.Equal("The function has no structural similarity to the previous function.", candidate.RejectionReason);
+    }
+
     private static class TestFunctions {
         public static FunctionGraph PreviousTarget() => Target(0x1000, callTarget: 0x1800, ripTarget: 0x9000, memberOffset: 0x20);
 
@@ -94,6 +122,12 @@ public class FunctionFingerprintMatcherTests {
         public static CallGraph EqualScoreCandidatesInReverseInputOrder() => Graph(
             SimilarTarget(0x5000, extraInstruction: true),
             SimilarTarget(0x2000, extraInstruction: true));
+
+        public static CallGraph CurrentSuspectExactTarget() => Graph(Target(0x2800, 0x4800, 0xB000, 0x20) with { IsSuspect = true });
+
+        public static CallGraph CurrentUnrelatedFunction() => Graph(Function(0x2800, [
+            Instruction(0x2800, "int3", FlowControlKind.Interrupt)
+        ]));
 
         private static FunctionGraph Target(uint begin, uint callTarget, uint ripTarget, ulong memberOffset) => Function(begin, [
             Instruction(begin, "push", FlowControlKind.Next),
