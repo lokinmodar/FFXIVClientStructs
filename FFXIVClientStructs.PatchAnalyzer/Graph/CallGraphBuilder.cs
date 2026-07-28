@@ -71,6 +71,10 @@ public static class CallGraphBuilder {
                     EnqueueIfInRange(range, pending, instruction.NearBranchTarget);
                     EnqueueFallthrough(range, pending, fallthrough);
                     break;
+                case FlowControlKind.Transactional:
+                    EnqueueIfInRange(range, pending, instruction.NearBranchTarget);
+                    EnqueueFallthrough(range, pending, fallthrough);
+                    break;
                 case FlowControlKind.DirectBranch:
                     if (instruction.NearBranchTarget is { } branchTarget) {
                         if (IsInRange(range, branchTarget))

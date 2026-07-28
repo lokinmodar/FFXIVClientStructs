@@ -43,6 +43,21 @@ public class CallGraphBuilderTests {
     }
 
     [Fact]
+    public void Build_TransactionalInstruction_TraversesAbortTargetAndFallthrough() {
+        var decoder = FakeInstructionDecoder.For([
+            Instruction.At(0x1000, 2, FlowControlKind.Transactional, target: 0x1010),
+            Instruction.At(0x1002, 1, FlowControlKind.Return),
+            Instruction.At(0x1010, 1, FlowControlKind.Return)
+        ]);
+        var context = TestImages.Function(0x1000, 0x1020);
+
+        var function = Assert.Single(
+            CallGraphBuilder.Build(context.Image, context.FunctionIndex, decoder).Functions);
+
+        Assert.Equal([0x1000u, 0x1002u, 0x1010u], function.ReachableInstructions.Select(rva => rva.Value));
+    }
+
+    [Fact]
     public void Build_WithIcedDecoder_TraversesControlFlowWithoutDecodingEmbeddedTable() {
         var bytes = new byte[0x20];
         new byte[] { 0xE8, 0xFB, 0x0F, 0x00, 0x00 }.CopyTo(bytes.AsSpan(0x00, 0x05)); // call 0x2000
