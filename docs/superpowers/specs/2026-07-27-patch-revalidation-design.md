@@ -122,21 +122,47 @@ Evolve `FFXIVClientStructs.ResolverTester` into `FFXIVClientStructs.PatchAnalyze
 
 Use the Iced package behind a narrow decoder interface for the PoC. Iced is pure C#, MIT-licensed, exposes control-flow and operand information, and is compatible with the repository's .NET target. Its most recent NuGet release is from 2024, so the dependency must be isolated and covered by byte-level fixtures.
 
+The decoder choice was smoke-tested read-only against FFXIV build `2026.06.18.0000.0000`, SHA-256 `4236E770E673150E85F8D10BEAB2FC4834C82F86AAB8A555A9175439FC906A6D`. A diagnostic linear pass with Iced 1.21 advanced through approximately 7.76 million decode steps across 172,905 x64 runtime-function ranges without crossing a range boundary. It also encountered tables and padding embedded in `.text`; this pass demonstrates compatibility with the current binary's instruction encoding, but it does not prove that every covered byte is code. The production preflight therefore validates reachable instructions from accepted function entries and signature anchors instead of requiring every byte in a runtime-function range to decode as code.
+
 References:
 
 - <https://www.nuget.org/packages/Iced/>
 - <https://github.com/icedland/iced>
 
+#### Zydis
+
+Zydis is the primary alternative instruction decoder. It is an actively maintained, MIT-licensed C11 x86/x64 decoder with detailed instruction metadata and no third-party runtime dependencies.
+
+It is not selected for the C# PoC because the project publishes official Rust and Python bindings but no official .NET binding. Using it would add a repository-owned P/Invoke layer, native Windows artifacts, architecture-specific packaging, and a second build/toolchain boundary. The `InstructionDecoder` abstraction intentionally preserves the option to replace Iced with Zydis if a future FFXIV build exposes an Iced coverage gap or Iced maintenance becomes unacceptable.
+
+Reference:
+
+- <https://github.com/zyantific/zydis>
+
 #### Ghidra headless
 
-Ghidra officially supports headless analysis and Version Tracking. It can remain an optional comparison or investigation backend for low-confidence cases.
+Ghidra headless does apply to this problem. It can import each PE, run auto-analysis, and execute ordered pre- and post-analysis scripts without opening the UI. That makes it a credible optional enrichment backend or oracle for function discovery, xrefs, switch recovery, and low-confidence comparisons. Ghidra also has a separate Version Tracking feature, although this design does not assume an off-the-shelf headless command that performs the complete old-to-new mapping; a reproducible integration would still require repository-owned scripts, analyzer settings, and an export contract.
 
-It is not selected as the core because it retains a heavyweight external installation, analysis-project lifecycle, Java version, analyzer configuration, and tool-version dependency.
+It is not selected as the required core because it retains a heavyweight external installation, analysis-project lifecycle, Java version, analyzer configuration, and tool-version dependency. Its output and runtime must be benchmarked on the FFXIV corpus before it can influence automatic candidate acceptance. The standalone C# pass remains the deterministic fast path; Ghidra-derived evidence may be added later without making Ghidra a patch-day prerequisite.
 
 References:
 
 - <https://ghidra.re/ghidra_docs/api/ghidra/app/util/headless/HeadlessAnalyzer.html>
-- <https://ghidra.re/ghidra_docs/GhidraClass/Intermediate/Intermediate_Ghidra_Student_Guide.html>
+- <https://github.com/NationalSecurityAgency/ghidra/tree/master/Ghidra/Features/VersionTracking>
+
+#### IDADiffCalculator-NG
+
+`IDADiffCalculator-NG` is an IDA C++ plugin whose current implementation exports an analyzed database into text snapshots. Its selectable outputs include image base, segments, strings, xrefs, disassembly and operand metadata, function ranges, globals and inferred types, names, MSVC RTTI, and vtables.
+
+Despite its name, the inspected implementation does not compare two exports or recover moved locations. It is interactive, calls IDA SDK analysis APIs, and therefore inherits the IDB/IDA dependency this project is trying to remove from the required path. Several exporters walk addresses one byte at a time, and the assembly export changes IDB operand-display state before warning the operator to close without saving. Those properties make it unsuitable as the implementation of a fast, read-only core.
+
+Its value is architectural: it demonstrates a useful tool-neutral `AnalysisSnapshot` boundary between an analysis producer and a separate cross-version matcher. It may also serve as an optional oracle when comparing PatchAnalyzer's function, xref, RTTI, and vtable extraction against an already reviewed IDB.
+
+The repository currently contains no published license, so its code must not be copied or ported. Only independently implemented concepts and output categories may be considered.
+
+Reference:
+
+- <https://github.com/usernameak/IDADiffCalculator-NG>
 
 #### Rizin
 
@@ -212,15 +238,21 @@ flowchart LR
 #### `FunctionIndex`
 
 - Uses x64 `.pdata` runtime-function records as the primary source of function ranges.
+- Treats those ranges as unwind coverage and candidate boundaries, not proof that every covered byte is executable code.
+- Accepts a candidate entry for graph evidence only when recursive decoding from its begin RVA completes without a reachable invalid instruction and every recorded call-site lies on a reachable basic block.
+- Marks a range suspect when entry decoding fails; suspect ranges remain available as containment metadata but cannot support an automatically accepted candidate.
+- Excludes embedded tables and padding from instruction coverage metrics.
 - Marks leaf functions and addresses without unwind metadata as incomplete rather than inventing boundaries.
 - Provides exact containment and function-start queries.
 
 #### `CallGraphBuilder`
 
-- Decodes `.text` once per executable.
+- Recursively decodes reachable basic blocks from `.pdata` entries that pass entry validation and from trusted signature anchors.
+- Never linearly decodes every byte in `.text` or assumes fallthrough through embedded tables, padding, returns, exceptions, interrupts, or indirect branches.
 - Indexes direct relative calls and supported unconditional tail jumps.
 - Records source function, call-site RVA, target RVA, and normalized instruction context.
 - Excludes indirect calls from PoC recovery but reports their presence.
+- Treats an invalid instruction reached from a trusted entry as a symbol-local decoder diagnostic; invalid bytes found only in unreachable data do not fail the run.
 
 #### `DirectMatcher`
 
@@ -434,6 +466,8 @@ Required scenarios:
 6. relative-follow offsets resolve a call-site signature;
 7. comments and ordering survive candidate-YAML generation;
 8. identical runs produce byte-identical JSON and YAML.
+9. a runtime-function range containing an embedded jump table does not decode the table as instructions;
+10. an invalid instruction reachable from a trusted entry produces `analysis_error`, while invalid bytes in unreachable padding do not.
 
 ### Local real-binary smoke test
 
@@ -512,5 +546,7 @@ These phases are separate future designs:
 2. add normalized whole-function fingerprints and graph voting;
 3. cover unsigned `data.yml` functions, vtables, instances, and globals;
 4. expose report-import adapters for IDA, Ghidra, and Binary Ninja;
-5. evaluate Ghidra Version Tracking or Rizin as optional comparison backends;
-6. add stable performance-regression gates after collecting representative local benchmarks.
+5. define a versioned, tool-neutral `AnalysisSnapshot` contract and evaluate optional IDA/Ghidra exporters against it;
+6. evaluate Ghidra Version Tracking or Rizin as optional comparison backends;
+7. benchmark a Zydis decoder adapter if Iced compatibility or maintenance becomes a blocker;
+8. add stable performance-regression gates after collecting representative local benchmarks.
