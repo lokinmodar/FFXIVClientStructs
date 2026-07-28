@@ -27,6 +27,16 @@ public class CallSiteFingerprintTests {
             CallSiteFingerprint.Create(changed).Sha256);
     }
 
+    [Fact]
+    public void Create_PreservesSmallScalarImmediateWhenImageBoundsAreProvided() {
+        var original = TestInstructions.WindowWithScalarAndStackOffsets(scalar: 4, stackOffset: 0x20);
+        var changed = TestInstructions.WindowWithScalarAndStackOffsets(scalar: 8, stackOffset: 0x20);
+
+        Assert.NotEqual(
+            CallSiteFingerprint.Create(original, imageSize: 0x5000, imageBase: 0x140000000).Sha256,
+            CallSiteFingerprint.Create(changed, imageSize: 0x5000, imageBase: 0x140000000).Sha256);
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(3)]

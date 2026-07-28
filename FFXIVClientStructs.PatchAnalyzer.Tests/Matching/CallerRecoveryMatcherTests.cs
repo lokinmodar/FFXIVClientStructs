@@ -75,15 +75,38 @@ public class CallerRecoveryMatcherTests {
     }
 
     [Fact]
+    public void Recover_TrustedOldCallSiteWithoutFullWindow_ReturnsUnsupported() {
+        var result = CallerRecoveryMatcher.Recover(
+            TestRecovery.MissingCallSiteSignature(0x1230, target: 0x1500),
+            TestGraphs.DispatchBlockReachableOnlyFromTrustedCallSite(0x1230),
+            TestGraphs.UniqueEquivalentDispatchBlock(0x2230, target: 0x2800),
+            TestRecovery.TrustedDispatchContext(previousHasFullWindow: false));
+
+        Assert.Equal(SymbolStatus.Unsupported, result.Status);
+    }
+
+    [Fact]
     public void Recover_NormalizesImageRangeImmediatePointers() {
         var result = CallerRecoveryMatcher.Recover(
             TestRecovery.MissingDirectTarget(0x1500),
-            TestGraphs.IncomingCallWithImagePointer(0x1200, 0x1230, 0x1500, pointer: 0x1800),
-            TestGraphs.IncomingCallWithImagePointer(0x2200, 0x2230, 0x2800, pointer: 0x2800),
+            TestGraphs.IncomingCallWithImagePointer(0x1200, 0x1230, 0x1500, pointer: 0x140001800),
+            TestGraphs.IncomingCallWithImagePointer(0x2200, 0x2230, 0x2800, pointer: 0x140002800),
             TestRecovery.SignedCallerAnchor(0x1200, 0x2200));
 
         Assert.Equal(SymbolStatus.CallerRecovered, result.Status);
         Assert.Equal(new Rva(0x2800), result.CurrentTarget);
+    }
+
+    [Fact]
+    public void Recover_PreservesSmallScalarImmediateWhenImageBoundsAreProvided() {
+        var result = CallerRecoveryMatcher.Recover(
+            TestRecovery.MissingDirectTarget(0x1500),
+            TestGraphs.IncomingCallWithScalar(0x1200, 0x1230, 0x1500, scalar: 4),
+            TestGraphs.IncomingCallWithScalar(0x2200, 0x2230, 0x2800, scalar: 8),
+            TestRecovery.SignedCallerAnchor(0x1200, 0x2200));
+
+        Assert.Equal(SymbolStatus.PossibleInlining, result.Status);
+        Assert.Null(result.CurrentTarget);
     }
 
     [Fact]
@@ -149,12 +172,12 @@ public class CallerRecoveryMatcherTests {
             },
             new Dictionary<Rva, SymbolAnalysis>());
 
-        public static CallerRecoveryContext TrustedDispatchContext() => Context(
+        public static CallerRecoveryContext TrustedDispatchContext(bool previousHasFullWindow = true) => Context(
             4,
             new Dictionary<Rva, FunctionMatchResult> { [new Rva(0x1200)] = ExactMatch(0x2200) },
             new Dictionary<Rva, SymbolAnalysis>(),
-            ImageWithDirectCall(0x1230, 0x1500),
-            ImageWithDirectCall(0x2230, 0x2800));
+            ImageWithDirectCall(0x1230, 0x1500, previousHasFullWindow),
+            ImageWithDirectCall(0x2230, 0x2800, hasFullWindow: true));
 
         public static CallerRecoveryContext ContextWithRadius(int radius) => Context(
             radius,
@@ -174,12 +197,17 @@ public class CallerRecoveryMatcherTests {
             currentImage ?? TestImages.WithExecutableBytes(new byte[0x4000]),
             new IcedInstructionDecoder());
 
-        private static PeImage ImageWithDirectCall(uint callSite, uint target) {
+        private static PeImage ImageWithDirectCall(uint callSite, uint target, bool hasFullWindow) {
             var bytes = new byte[0x4000];
             var offset = checked((int)(callSite - 0x1000));
+            if (hasFullWindow)
+                Array.Fill(bytes, (byte)0x90, offset - CallSiteFingerprint.InstructionRadius, CallSiteFingerprint.InstructionRadius);
             bytes[offset] = 0xE8;
             BitConverter.GetBytes(checked((int)(target - (callSite + 5)))).CopyTo(bytes, offset + 1);
-            bytes[offset + 5] = 0xC3;
+            if (hasFullWindow)
+                Array.Fill(bytes, (byte)0x90, offset + 5, CallSiteFingerprint.InstructionRadius);
+            else
+                bytes[offset + 5] = 0xC3;
             return TestImages.WithExecutableBytes(bytes);
         }
 
@@ -244,8 +272,12 @@ public class CallerRecoveryMatcherTests {
             Function(0x2200, [Instruction(0x2200, "Ret", FlowControlKind.Return)]),
             []);
 
-        public static CallGraph IncomingCallWithImagePointer(uint caller, uint callSite, uint target, uint pointer) => Graph(
+        public static CallGraph IncomingCallWithImagePointer(uint caller, uint callSite, uint target, ulong pointer) => Graph(
             Function(caller, [ImagePointer(caller, pointer), Call(callSite, target), Instruction(callSite + 5, "Ret", FlowControlKind.Return)]),
+            [new CallEdge(new Rva(caller), new Rva(callSite), new Rva(target), CallEdgeKind.DirectCall)]);
+
+        public static CallGraph IncomingCallWithScalar(uint caller, uint callSite, uint target, byte scalar) => Graph(
+            Function(caller, [Scalar(caller, scalar), Call(callSite, target), Instruction(callSite + 5, "Ret", FlowControlKind.Return)]),
             [new CallEdge(new Rva(caller), new Rva(callSite), new Rva(target), CallEdgeKind.DirectCall)]);
 
         private static CallGraph Graph(FunctionGraph function, ImmutableArray<CallEdge> edges) => new([function], edges);
@@ -267,14 +299,23 @@ public class CallerRecoveryMatcherTests {
             null,
             [new DecodedConstant(new ByteRange(1, 4), EncodedConstantKind.BranchDisplacement, 0)]);
 
-        private static DecodedInstruction ImagePointer(uint rva, uint pointer) => new(
+        private static DecodedInstruction ImagePointer(uint rva, ulong pointer) => new(
             new Rva(rva),
-            [0xB8, (byte)pointer, (byte)(pointer >> 8), (byte)(pointer >> 16), (byte)(pointer >> 24)],
+            [0x48, 0xB8, .. BitConverter.GetBytes(pointer)],
             "Mov_Register_Immediate",
             FlowControlKind.Next,
             null,
             null,
-            [new DecodedConstant(new ByteRange(1, 4), EncodedConstantKind.Immediate, pointer)]);
+            [new DecodedConstant(new ByteRange(2, 8), EncodedConstantKind.Immediate, pointer)]);
+
+        private static DecodedInstruction Scalar(uint rva, byte scalar) => new(
+            new Rva(rva),
+            [0x83, 0xF8, scalar],
+            "Cmp_Register_Immediate",
+            FlowControlKind.Next,
+            null,
+            null,
+            [new DecodedConstant(new ByteRange(2, 1), EncodedConstantKind.Immediate, scalar)]);
 
         private static DecodedInstruction Instruction(uint rva, string opcodeKey, FlowControlKind flowControl) => new(
             new Rva(rva),

@@ -115,7 +115,8 @@ public static class CallerRecoveryMatcher {
                 previousFunction,
                 edge.CallSite,
                 context.CallSiteInstructionRadius,
-                checked((uint)context.PreviousImage.SizeOfImage));
+                checked((uint)context.PreviousImage.SizeOfImage),
+                context.PreviousImage.ImageBase);
             var matchingEdges = current.DirectCalls
                 .Where(candidate => candidate.SourceFunction == currentCaller)
                 .Where(candidate => candidate.Kind == edge.Kind)
@@ -123,7 +124,8 @@ public static class CallerRecoveryMatcher {
                     currentFunction,
                     candidate.CallSite,
                     context.CallSiteInstructionRadius,
-                    checked((uint)context.CurrentImage.SizeOfImage)).Sha256 == previousFingerprint.Sha256)
+                    checked((uint)context.CurrentImage.SizeOfImage),
+                    context.CurrentImage.ImageBase).Sha256 == previousFingerprint.Sha256)
                 .OrderBy(candidate => candidate.CallSite.Value)
                 .ThenBy(candidate => candidate.Target.Value)
                 .ToImmutableArray();
@@ -243,16 +245,22 @@ public static class CallerRecoveryMatcher {
         var currentFunction = FindFunction(current, currentCaller);
         if (currentFunction is null || currentFunction.IsSuspect)
             return new TrustedSeedResult(null, false, true, false, false);
-        if (!TryDecodeWindow(context.PreviousImage, context.Decoder, previousFunction.Range, previousCallSite, out var previousWindow) ||
-            !IsDirectOpcode(previousWindow[0]))
+        if (!TryDecodeCallSiteWindow(context.PreviousImage, context.Decoder, previousFunction.Range, previousCallSite, out var previousWindow) ||
+            !IsDirectOpcode(previousWindow[CallSiteFingerprint.InstructionRadius]))
             return new TrustedSeedResult(null, false, true, false, false);
 
-        var previousFingerprint = CallSiteFingerprint.Create(previousWindow, checked((uint)context.PreviousImage.SizeOfImage));
+        var previousFingerprint = CallSiteFingerprint.Create(
+            previousWindow,
+            checked((uint)context.PreviousImage.SizeOfImage),
+            context.PreviousImage.ImageBase);
         var candidates = ImmutableArray.CreateBuilder<(Rva Candidate, ImmutableArray<DecodedInstruction> Window)>();
         foreach (var candidate in FindDirectOpcodeCandidates(context.CurrentImage, currentFunction.Range)) {
-            if (!TryDecodeWindow(context.CurrentImage, context.Decoder, currentFunction.Range, candidate, out var window) ||
-                !IsDirectOpcode(window[0]) ||
-                CallSiteFingerprint.Create(window, checked((uint)context.CurrentImage.SizeOfImage)).Sha256 != previousFingerprint.Sha256)
+            if (!TryDecodeCallSiteWindow(context.CurrentImage, context.Decoder, currentFunction.Range, candidate, out var window) ||
+                !IsDirectOpcode(window[CallSiteFingerprint.InstructionRadius]) ||
+                CallSiteFingerprint.Create(
+                    window,
+                    checked((uint)context.CurrentImage.SizeOfImage),
+                    context.CurrentImage.ImageBase).Sha256 != previousFingerprint.Sha256)
                 continue;
 
             candidates.Add((candidate, window));
@@ -264,7 +272,7 @@ public static class CallerRecoveryMatcher {
 
         if (matchingCandidates.IsEmpty)
             return new TrustedSeedResult(null, false, false, true, false);
-        if (matchingCandidates.Length != 1 || matchingCandidates[0].Window[0].NearBranchTarget is not { } currentTarget)
+        if (matchingCandidates.Length != 1 || matchingCandidates[0].Window[CallSiteFingerprint.InstructionRadius].NearBranchTarget is not { } currentTarget)
             return new TrustedSeedResult(null, false, false, false, true);
 
         return new TrustedSeedResult(
@@ -296,37 +304,106 @@ public static class CallerRecoveryMatcher {
             .ToImmutableArray();
     }
 
-    private static bool TryDecodeWindow(
+    private static bool TryDecodeCallSiteWindow(
         PeImage image,
         IInstructionDecoder decoder,
         RuntimeFunctionRange range,
-        Rva start,
+        Rva callSite,
         out ImmutableArray<DecodedInstruction> instructions) {
-        var decoded = ImmutableArray.CreateBuilder<DecodedInstruction>(CallSiteFingerprint.InstructionRadius + 1);
-        var current = start;
-        for (var index = 0; index <= CallSiteFingerprint.InstructionRadius; index++) {
-            if (current.Value < range.Begin.Value || current.Value >= range.End.Value ||
-                !image.TryRead(current, checked((int)(range.End.Value - current.Value)), out var bytes)) {
-                instructions = [];
-                return false;
+        if (!TryDecodeInstruction(image, decoder, range, callSite, out var call) || !IsDirectOpcode(call)) {
+            instructions = [];
+            return false;
+        }
+
+        var preceding = FindPrecedingInstructions(image, decoder, range, callSite);
+        if (preceding.Length != 1 || !TryDecodeFollowingInstructions(image, decoder, range, call, out var following)) {
+            instructions = [];
+            return false;
+        }
+
+        instructions = [.. preceding[0], call, .. following];
+        return true;
+    }
+
+    private static ImmutableArray<ImmutableArray<DecodedInstruction>> FindPrecedingInstructions(
+        PeImage image,
+        IInstructionDecoder decoder,
+        RuntimeFunctionRange range,
+        Rva callSite) {
+        const int MaximumInstructionLength = 15;
+        var earliest = callSite.Value > (uint)(CallSiteFingerprint.InstructionRadius * MaximumInstructionLength)
+            ? new Rva(Math.Max(range.Begin.Value, callSite.Value - (uint)(CallSiteFingerprint.InstructionRadius * MaximumInstructionLength)))
+            : range.Begin;
+        var candidates = ImmutableArray.CreateBuilder<ImmutableArray<DecodedInstruction>>();
+
+        for (var start = earliest.Value; start < callSite.Value; start++) {
+            var current = new Rva(start);
+            var decoded = ImmutableArray.CreateBuilder<DecodedInstruction>(CallSiteFingerprint.InstructionRadius);
+            for (var index = 0; index < CallSiteFingerprint.InstructionRadius; index++) {
+                if (!TryDecodeInstruction(image, decoder, range, current, out var instruction) ||
+                    DoesNotFallThrough(instruction))
+                    break;
+
+                decoded.Add(instruction);
+                current = new Rva(checked(current.Value + (uint)instruction.Bytes.Length));
             }
 
-            var result = decoder.Decode(bytes.Span, current);
-            if (!result.Success || result.Instruction is not { } instruction || instruction.Rva != current || instruction.Bytes.IsEmpty ||
-                instruction.Bytes.Length > range.End.Value - current.Value) {
+            if (decoded.Count == CallSiteFingerprint.InstructionRadius && current == callSite)
+                candidates.Add(decoded.ToImmutable());
+        }
+
+        return candidates.ToImmutable();
+    }
+
+    private static bool TryDecodeFollowingInstructions(
+        PeImage image,
+        IInstructionDecoder decoder,
+        RuntimeFunctionRange range,
+        DecodedInstruction call,
+        out ImmutableArray<DecodedInstruction> instructions) {
+        var decoded = ImmutableArray.CreateBuilder<DecodedInstruction>(CallSiteFingerprint.InstructionRadius);
+        var current = new Rva(checked(call.Rva.Value + (uint)call.Bytes.Length));
+        for (var index = 0; index < CallSiteFingerprint.InstructionRadius; index++) {
+            if (!TryDecodeInstruction(image, decoder, range, current, out var instruction) ||
+                index < CallSiteFingerprint.InstructionRadius - 1 && DoesNotFallThrough(instruction)) {
                 instructions = [];
                 return false;
             }
 
             decoded.Add(instruction);
-            if (instruction.FlowControl is FlowControlKind.Return or FlowControlKind.Interrupt or FlowControlKind.Exception)
-                break;
             current = new Rva(checked(current.Value + (uint)instruction.Bytes.Length));
         }
 
         instructions = decoded.ToImmutable();
-        return !instructions.IsEmpty;
+        return true;
     }
+
+    private static bool TryDecodeInstruction(
+        PeImage image,
+        IInstructionDecoder decoder,
+        RuntimeFunctionRange range,
+        Rva rva,
+        out DecodedInstruction instruction) {
+        instruction = null!;
+        if (rva.Value < range.Begin.Value || rva.Value >= range.End.Value ||
+            !image.TryRead(rva, checked((int)(range.End.Value - rva.Value)), out var bytes))
+            return false;
+
+        var result = decoder.Decode(bytes.Span, rva);
+        if (!result.Success || result.Instruction is not { } decoded || decoded.Rva != rva || decoded.Bytes.IsEmpty ||
+            decoded.Bytes.Length > range.End.Value - rva.Value)
+            return false;
+
+        instruction = decoded;
+        return true;
+    }
+
+    private static bool DoesNotFallThrough(DecodedInstruction instruction) => instruction.FlowControl is
+        FlowControlKind.DirectBranch or
+        FlowControlKind.IndirectBranch or
+        FlowControlKind.Return or
+        FlowControlKind.Interrupt or
+        FlowControlKind.Exception;
 
     private static bool IsDirectOpcode(DecodedInstruction instruction) =>
         instruction.Bytes[0] is 0xE8 or 0xE9 &&
