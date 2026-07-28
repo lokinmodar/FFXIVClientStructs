@@ -6,7 +6,8 @@
   <Project Path="CompatChecker/CompatChecker.csproj" />
   <Project Path="ExcelGenerator/ExcelGenerator.csproj" />
   <Project Path="FFXIVClientStructs.Generators/FFXIVClientStructs.Generators.csproj" />
-  <Project Path="FFXIVClientStructs.ResolverTester/FFXIVClientStructs.ResolverTester.csproj" />
+  <Project Path="FFXIVClientStructs.PatchAnalyzer/FFXIVClientStructs.PatchAnalyzer.csproj" />
+  <Project Path="FFXIVClientStructs.PatchAnalyzer.Tests/FFXIVClientStructs.PatchAnalyzer.Tests.csproj" />
   <Project Path="FFXIVClientStructs.StdContainerTester/FFXIVClientStructs.StdContainerTester.csproj" />
   <Project Path="FFXIVClientStructs/FFXIVClientStructs.csproj" />
   <Project Path="InteropGenerator.Runtime/InteropGenerator.Runtime.csproj" />
