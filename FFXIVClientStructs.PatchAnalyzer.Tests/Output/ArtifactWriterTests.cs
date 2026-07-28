@@ -1,4 +1,5 @@
 using System.Collections.Immutable;
+using System.Reflection;
 using System.Text;
 using FFXIVClientStructs.PatchAnalyzer.Analysis;
 using FFXIVClientStructs.PatchAnalyzer.Binary;
@@ -65,6 +66,108 @@ public class ArtifactWriterTests {
         var output = CandidateYamlWriter.Render(result);
 
         Assert.StartsWith("# REVIEW REQUIRED: generated candidate; verify before applying.\nversion: 2026.07.28.0000.0000 # keep\n", output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void CandidateYaml_NormalizesCrLfAndAddsOneFinalNewline() {
+        const string source = "version: old\r\nglobals: {}\r\nfunctions: {}\r\nclasses: {}";
+
+        var output = CandidateYamlWriter.Render(TestResults.WithVersionOverride(source, "new"));
+
+        Assert.DoesNotContain('\r', output);
+        Assert.EndsWith("classes: {}\n", output, StringComparison.Ordinal);
+        Assert.False(output.EndsWith("\n\n", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Write_ChangedInputSource_RejectsStaleCatalogAndDoesNotWriteCandidate() {
+        const string source = """
+                              version: old
+                              globals: {}
+                              functions:
+                                0x140001000: Test
+                              classes: {}
+                              """;
+        var result = TestResults.OneAcceptedReplacement(source, "0x140001000", "0x140003000");
+        var directory = Path.Combine(Path.GetTempPath(), $"PatchAnalyzerTests-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        var inputPath = Path.Combine(directory, "data.yml");
+        var outputPath = Path.Combine(directory, "data.candidate.yml");
+        File.WriteAllText(inputPath, source.Replace("0x140001000", "0x140001001", StringComparison.Ordinal), new UTF8Encoding(false));
+
+        try {
+            Assert.Throws<InvalidOperationException>(() => CandidateYamlWriter.Write(result, inputPath, outputPath, TestContext.Current.CancellationToken));
+
+            Assert.False(File.Exists(outputPath));
+        } finally {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void CandidateYaml_DuplicateReplacementSpans_Throws() {
+        const string source = """
+                              version: old
+                              globals: {}
+                              functions:
+                                0x140001000: Test
+                              classes: {}
+                              """;
+        var result = TestResults.WithAnalyses(source, [
+            TestResults.Analysis(SymbolStatus.DirectUnique, 0x1000, 0x3000),
+            TestResults.Analysis(SymbolStatus.StructuralRecovered, 0x1000, 0x4000)
+        ]);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => CandidateYamlWriter.Render(result));
+
+        Assert.Contains("unique", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void CandidateYaml_OverlappingReplacementSpans_Throws() {
+        const string source = "version: old\nglobals: {}\nfunctions: {}\nclasses: {}\n";
+        var catalog = TestResults.CatalogWithLocations(source, [
+            new DataLocation("First", LocationKind.Function, new PreferredVa(0x140001000), new Rva(0x1000), new SourceSpan(0, 8)),
+            new DataLocation("Second", LocationKind.Function, new PreferredVa(0x140001001), new Rva(0x1001), new SourceSpan(4, 8))
+        ]);
+        var result = TestResults.WithCatalog(catalog, [
+            TestResults.Analysis(SymbolStatus.DirectUnique, 0x1000, 0x3000),
+            TestResults.Analysis(SymbolStatus.CallerRecovered, 0x1001, 0x4000)
+        ]);
+
+        var exception = Assert.Throws<InvalidOperationException>(() => CandidateYamlWriter.Render(result));
+
+        Assert.Contains("overlap", exception.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Write_EqualInputAndOutputPaths_Throws() {
+        var path = Path.Combine(Path.GetTempPath(), $"PatchAnalyzerTests-{Guid.NewGuid():N}.yml");
+
+        try {
+            Assert.Throws<ArgumentException>(() => CandidateYamlWriter.Write(TestResults.WithMetrics(), path, path, TestContext.Current.CancellationToken));
+        } finally {
+            if (File.Exists(path))
+                File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void Write_FailedRun_DoesNotWriteCandidate() {
+        var directory = Path.Combine(Path.GetTempPath(), $"PatchAnalyzerTests-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        var inputPath = Path.Combine(directory, "data.yml");
+        var outputPath = Path.Combine(directory, "data.candidate.yml");
+        var result = TestResults.WithMetrics() with { RunStatus = "failed" };
+        File.WriteAllText(inputPath, result.Data.SourceText, new UTF8Encoding(false));
+
+        try {
+            Assert.Throws<InvalidOperationException>(() => CandidateYamlWriter.Write(result, inputPath, outputPath, TestContext.Current.CancellationToken));
+
+            Assert.False(File.Exists(outputPath));
+        } finally {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 
     [Fact]
@@ -137,6 +240,23 @@ public class ArtifactWriterTests {
             new AnalysisMetrics(ImmutableSortedDictionary<string, long>.Empty),
             ImmutableSortedDictionary<string, long>.Empty);
 
+        public static PatchAnalysisResult WithAnalyses(string source, SymbolAnalysis[] analyses) => Create(source, analyses);
+
+        public static PatchAnalysisResult WithCatalog(DataCatalog catalog, SymbolAnalysis[] analyses) => new(
+            "succeeded",
+            Identity("previous.exe", "old"),
+            new BinaryIdentity("current.exe", 123, new string('A', 64), null, "none"),
+            new AnalysisConfiguration(10, 96, 8, null, null),
+            catalog,
+            analyses.ToImmutableArray(),
+            new AnalysisMetrics(ImmutableSortedDictionary<string, long>.Empty),
+            ImmutableSortedDictionary<string, long>.Empty);
+
+        public static DataCatalog CatalogWithLocations(string source, DataLocation[] locations) {
+            var constructor = typeof(DataCatalog).GetConstructor(BindingFlags.Instance | BindingFlags.NonPublic, null, [typeof(string), typeof(string), typeof(SourceSpan), typeof(ImmutableArray<DataLocation>), typeof(ImmutableHashSet<string>)], null)!;
+            return (DataCatalog)constructor.Invoke([source, "old", new SourceSpan(0, 3), locations.ToImmutableArray(), ImmutableHashSet<string>.Empty]);
+        }
+
         private static PatchAnalysisResult Create(string source, SymbolAnalysis[] analyses, params (string Stage, long Milliseconds)[] metrics) => new(
             "succeeded",
             Identity("previous.exe", "old"),
@@ -147,7 +267,7 @@ public class ArtifactWriterTests {
             new AnalysisMetrics(metrics.ToImmutableSortedDictionary(metric => metric.Stage, metric => metric.Milliseconds, StringComparer.Ordinal)),
             ImmutableSortedDictionary.CreateRange(StringComparer.Ordinal, new Dictionary<string, long> { ["signatures"] = analyses.Length }));
 
-        private static SymbolAnalysis Analysis(SymbolStatus status, uint previousRva, uint currentRva) => new(
+        public static SymbolAnalysis Analysis(SymbolStatus status, uint previousRva, uint currentRva) => new(
             "Test.Symbol",
             "Test::Symbol",
             LocationKind.Function,

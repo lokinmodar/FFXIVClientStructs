@@ -68,3 +68,39 @@ The test project reports four existing nullable warnings in `FFXIVClientStructs.
 - Confirmed candidate replacements derive from catalog spans, preserve untouched source text, and apply in descending position order.
 - Confirmed failure/cancellation cleanup is scoped to the writer's unique temporary file.
 - Confirmed `git diff --check` reported no whitespace errors before staging.
+
+## Fix Round 1
+
+### Findings Addressed
+
+- Candidate YAML rendering now normalizes all line endings to LF and removes trailing LF characters before adding exactly one final LF.
+- `CandidateYamlWriter.Write` now reads the declared input path before creating an atomic output file and requires its content to match `result.Data.SourceText` ordinally. Replacements are constructed from that validated live source, so changed input is rejected before candidate output is created.
+- Added targeted writer tests for CRLF/no-final-newline normalization, stale input rejection, duplicate spans, overlapping spans, equal input/output paths, and failed-run candidate suppression.
+
+### TDD Evidence
+
+Focused red command:
+
+```powershell
+dotnet test .\FFXIVClientStructs.PatchAnalyzer.Tests\FFXIVClientStructs.PatchAnalyzer.Tests.csproj --filter FullyQualifiedName~ArtifactWriterTests --no-restore
+```
+
+Result before the production fix: `2` failed and `9` passed. The intended failures were:
+
+- `CandidateYaml_NormalizesCrLfAndAddsOneFinalNewline`: CRLF remained in the rendered candidate.
+- `Write_ChangedInputSource_RejectsStaleCatalogAndDoesNotWriteCandidate`: no exception was thrown for changed input content.
+
+Final focused verification used the same command: `11` passed, `0` failed, duration `120 ms`.
+
+Full analyzer-project verification:
+
+```powershell
+dotnet test .\FFXIVClientStructs.PatchAnalyzer.Tests\FFXIVClientStructs.PatchAnalyzer.Tests.csproj --no-restore
+```
+
+Result: `121` passed, `0` failed, duration `346 ms`.
+
+### Review Notes
+
+- The overlap test constructs an intentionally invalid catalog through the existing private constructor via reflection; this keeps malformed-span coverage test-only and avoids broadening the production data API.
+- The analyzer test project still emits four pre-existing nullable warnings in `FFXIVClientStructs.PatchAnalyzer.Tests/Data/SignatureCorrelatorTests.cs`. This fix round does not modify that file.
