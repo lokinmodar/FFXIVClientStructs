@@ -1,5 +1,5 @@
-using FFXIVClientStructs.PatchAnalyzer.Cli;
 using FFXIVClientStructs.PatchAnalyzer.Analysis;
+using FFXIVClientStructs.PatchAnalyzer.Cli;
 
 using var cancellation = new CancellationTokenSource();
 Console.CancelKeyPress += (_, eventArgs) => {

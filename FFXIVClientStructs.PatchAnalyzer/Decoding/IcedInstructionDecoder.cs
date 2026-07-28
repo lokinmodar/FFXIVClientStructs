@@ -1,6 +1,6 @@
 using System.Collections.Immutable;
-using Iced.Intel;
 using FFXIVClientStructs.PatchAnalyzer.Binary;
+using Iced.Intel;
 
 namespace FFXIVClientStructs.PatchAnalyzer.Decoding;
 

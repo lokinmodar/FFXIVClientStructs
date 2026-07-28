@@ -101,6 +101,7 @@ public class PatchAnalyzerApplicationTests {
 
             functions:
               0x140001000: Test::Symbol # retained function comment
+              0x140001010: Test::Unchanged # retained second function comment
             classes: {}
             """);
 
@@ -109,6 +110,10 @@ public class PatchAnalyzerApplicationTests {
         var candidate = File.ReadAllText(fixture.CandidateYamlPath);
         Assert.Contains("# retained comment\nversion: old # version comment\nglobals: {}\n\nfunctions:", candidate, StringComparison.Ordinal);
         Assert.Contains("0x140001020: Test::Symbol # retained function comment", candidate, StringComparison.Ordinal);
+        const string unchanged = "0x140001010: Test::Unchanged # retained second function comment";
+        Assert.Contains(unchanged, candidate, StringComparison.Ordinal);
+        Assert.True(
+            candidate.IndexOf("0x140001020: Test::Symbol # retained function comment", StringComparison.Ordinal) < candidate.IndexOf(unchanged, StringComparison.Ordinal));
     }
 
     [Fact]

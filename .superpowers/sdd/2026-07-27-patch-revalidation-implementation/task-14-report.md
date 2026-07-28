@@ -64,3 +64,28 @@ The optional real-binary smoke test was not run. The documented local paths `C:\
 - Accepted candidates continue to require unique scanner evidence; structural recovery remains exact-fingerprint based and caller recovery remains evidence based.
 - Iced remains confined to its adapter and package reference.
 - The CLI has no installed IDA, Ghidra, Binary Ninja, Rizin, debugger, Dynamis, ReClass.NET, or live-memory dependency.
+
+## Fix Round 1
+
+### Findings Addressed
+
+- Fixed the four formatter findings with mechanical import ordering only:
+  - `FFXIVClientStructs.PatchAnalyzer.Tests/Data/SignatureCorrelatorTests.cs`
+  - `FFXIVClientStructs.PatchAnalyzer.Tests/Graph/CallSiteFingerprintTests.cs`
+  - `FFXIVClientStructs.PatchAnalyzer/Decoding/IcedInstructionDecoder.cs`
+  - `FFXIVClientStructs.PatchAnalyzer/Program.cs`
+- Strengthened `RunAsync_CandidateYaml_PreservesCommentsOrderAndBlankLines` with a second, unchanged function entry. The test now asserts that the relocated accepted entry remains before the unchanged entry in rendered candidate YAML.
+
+### Red/Green Evidence
+
+- Red: the added assertion failed because the original fixture contained no second function entry (`Assert.Contains` could not find `0x140001010: Test::Unchanged`).
+- Green: after adding the second fixture entry, `dotnet test .\FFXIVClientStructs.PatchAnalyzer.Tests\FFXIVClientStructs.PatchAnalyzer.Tests.csproj --filter FullyQualifiedName~CandidateYaml_PreservesCommentsOrderAndBlankLines --no-restore` passed 1/1.
+
+### Full Verification
+
+- `dotnet restore .\FFXIVClientStructs.slnx`: passed.
+- `dotnet build .\FFXIVClientStructs.slnx --no-restore`: passed, 0 errors.
+- `dotnet test .\InteropGenerator.Tests\InteropGenerator.Tests.csproj --no-restore`: passed 165/165.
+- `dotnet test .\FFXIVClientStructs.PatchAnalyzer.Tests\FFXIVClientStructs.PatchAnalyzer.Tests.csproj --no-restore`: passed 134/134.
+- `dotnet format .\FFXIVClientStructs.slnx --verify-no-changes`: passed.
+- `node .\ida\data-validator.js`: passed.

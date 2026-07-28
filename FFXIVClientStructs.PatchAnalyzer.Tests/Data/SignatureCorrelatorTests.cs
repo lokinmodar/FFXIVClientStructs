@@ -1,8 +1,8 @@
 using FFXIVClientStructs.PatchAnalyzer.Binary;
 using FFXIVClientStructs.PatchAnalyzer.Data;
 using FFXIVClientStructs.PatchAnalyzer.Signatures;
-using YamlDotNet.Core;
 using Xunit;
+using YamlDotNet.Core;
 
 namespace FFXIVClientStructs.PatchAnalyzer.Tests.Data;
 

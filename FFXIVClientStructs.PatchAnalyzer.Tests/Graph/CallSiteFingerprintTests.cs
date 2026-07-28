@@ -1,7 +1,7 @@
+using System.Collections.Immutable;
 using FFXIVClientStructs.PatchAnalyzer.Binary;
 using FFXIVClientStructs.PatchAnalyzer.Decoding;
 using FFXIVClientStructs.PatchAnalyzer.Graph;
-using System.Collections.Immutable;
 using Xunit;
 
 namespace FFXIVClientStructs.PatchAnalyzer.Tests.Graph;
