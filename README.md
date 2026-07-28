@@ -11,6 +11,10 @@ We make extensive use of [C# Source Generators](https://learn.microsoft.com/en-u
 
 A database and script(s) are maintained in the [ida](https://github.com/aers/FFXIVClientStructs/tree/main/ida) folder which can be used to import a large number of location names to IDA or Ghidra. This database is updated with every patch, although keep in mind this is volunteer work and some patches require more effort than others. There is more info in the readme in the folder itself.
 
+### Patch Revalidation
+
+Contributors updating patch-day locations should use the offline PatchAnalyzer workflow and review process documented in [the patch revalidation runbook](docs/patch-revalidation.md). IDA and Ghidra remain optional investigation tools rather than PatchAnalyzer dependencies.
+
 ### Credits
 
 This project would not be possible without significant work from many members of the FFXIV RE/Dalamud communities.

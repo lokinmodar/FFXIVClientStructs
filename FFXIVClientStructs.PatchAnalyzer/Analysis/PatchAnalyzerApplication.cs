@@ -153,14 +153,15 @@ public sealed class PatchAnalyzerApplication {
         var direct = ImmutableArray.CreateBuilder<SymbolAnalysis>(correlated.Length);
         foreach (var entry in correlated) {
             cancellationToken.ThrowIfCancellationRequested();
-            direct.Add(WithSymbolIsolation(
+            var analysis = WithSymbolIsolation(
                 entry,
                 previousScans[entry.Signature.GeneratedName],
                 currentScans[entry.Signature.GeneratedName],
                 () => DirectMatcher.Match(
                     entry,
                     previousScans[entry.Signature.GeneratedName],
-                    currentScans[entry.Signature.GeneratedName])));
+                    currentScans[entry.Signature.GeneratedName]));
+            direct.Add(MarkSuspectFunction(analysis, previousGraph, currentGraph));
         }
 
         var functionMatches = RunStage("whole-function matching", reporter, stageMilliseconds, cancellationToken,
@@ -249,6 +250,37 @@ public sealed class PatchAnalyzerApplication {
             Diagnostics = analysis.Diagnostics
         };
         return CandidateClassifier.RevalidateRecovered(recovered, currentImage, currentFunctions, decoder);
+    }
+
+    private static SymbolAnalysis MarkSuspectFunction(SymbolAnalysis analysis, CallGraph previousGraph, CallGraph currentGraph) {
+        if (analysis.LocationKind != LocationKind.Function)
+            return analysis;
+
+        var diagnostics = new List<string>(analysis.Diagnostics);
+        AddSuspectFunctionDiagnostic(diagnostics, previousGraph, analysis.PreviousDataRva, "previous");
+        AddSuspectFunctionDiagnostic(diagnostics, currentGraph, analysis.CurrentTarget, "current");
+        if (diagnostics.Count == analysis.Diagnostics.Length)
+            return analysis;
+
+        return analysis with {
+            Status = SymbolStatus.AnalysisError,
+            CurrentTarget = null,
+            RecoveryEvidence = [],
+            SuggestedSignature = null,
+            Diagnostics = [.. diagnostics]
+        };
+    }
+
+    private static void AddSuspectFunctionDiagnostic(List<string> diagnostics, CallGraph graph, Rva? target, string version) {
+        if (target is not { } rva)
+            return;
+
+        var function = graph.Functions.FirstOrDefault(candidate =>
+            candidate.Range.Begin.Value <= rva.Value && rva.Value < candidate.Range.End.Value);
+        if (function is not { IsSuspect: true })
+            return;
+
+        diagnostics.AddRange(function.Diagnostics.Select(diagnostic => $"{version} function: {diagnostic}"));
     }
 
     private static SymbolAnalysis WithSymbolIsolation(
