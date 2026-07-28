@@ -6,6 +6,7 @@ using FFXIVClientStructs.PatchAnalyzer.Decoding;
 using FFXIVClientStructs.PatchAnalyzer.Graph;
 using FFXIVClientStructs.PatchAnalyzer.Matching;
 using FFXIVClientStructs.PatchAnalyzer.Signatures;
+using FFXIVClientStructs.PatchAnalyzer.Tests.Fixtures;
 using Xunit;
 
 namespace FFXIVClientStructs.PatchAnalyzer.Tests.Matching;
@@ -60,12 +61,28 @@ public class CallerRecoveryMatcherTests {
 
     [Fact]
     public void Recover_TrustedOldCallSiteSeedsUnreachableDispatchBlock() {
+        var previous = TestGraphs.DispatchBlockReachableOnlyFromTrustedCallSite(0x1230);
+        var current = TestGraphs.UniqueEquivalentDispatchBlock(0x2230, target: 0x2800);
         var result = CallerRecoveryMatcher.Recover(
             TestRecovery.MissingCallSiteSignature(0x1230, target: 0x1500),
-            TestGraphs.DispatchBlockReachableOnlyFromTrustedCallSite(0x1230),
-            TestGraphs.UniqueEquivalentDispatchBlock(0x2230, target: 0x2800),
+            previous,
+            current,
+            TestRecovery.TrustedDispatchContext());
+
+        Assert.Equal(new Rva(0x2800), result.CurrentTarget);
+        Assert.DoesNotContain(new Rva(0x1230), Assert.Single(previous.Functions).ReachableInstructions);
+        Assert.DoesNotContain(new Rva(0x2230), Assert.Single(current.Functions).ReachableInstructions);
+    }
+
+    [Fact]
+    public void Recover_NormalizesImageRangeImmediatePointers() {
+        var result = CallerRecoveryMatcher.Recover(
+            TestRecovery.MissingDirectTarget(0x1500),
+            TestGraphs.IncomingCallWithImagePointer(0x1200, 0x1230, 0x1500, pointer: 0x1800),
+            TestGraphs.IncomingCallWithImagePointer(0x2200, 0x2230, 0x2800, pointer: 0x2800),
             TestRecovery.SignedCallerAnchor(0x1200, 0x2200));
 
+        Assert.Equal(SymbolStatus.CallerRecovered, result.Status);
         Assert.Equal(new Rva(0x2800), result.CurrentTarget);
     }
 
@@ -78,6 +95,14 @@ public class CallerRecoveryMatcherTests {
             TestRecovery.SignedCallerAnchor(0x1200, 0x2200));
 
         Assert.Equal(SymbolStatus.Unsupported, result.Status);
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(3)]
+    [InlineData(5)]
+    public void Context_RequiresExactlyFourInstructionsOnEachSide(int radius) {
+        Assert.Throws<ArgumentOutOfRangeException>(() => TestRecovery.ContextWithRadius(radius));
     }
 
     private static class TestRecovery {
@@ -93,7 +118,7 @@ public class CallerRecoveryMatcherTests {
             SymbolStatus.Missing,
             new SignatureScanResult([new SignatureMatch(new Rva(callSite), new Rva(target))], false, []));
 
-        public static CallerRecoveryContext SignedCallerAnchor(uint oldCaller, uint currentCaller) => new(
+        public static CallerRecoveryContext SignedCallerAnchor(uint oldCaller, uint currentCaller) => Context(
             4,
             new Dictionary<Rva, FunctionMatchResult>(),
             new Dictionary<Rva, SymbolAnalysis> {
@@ -102,7 +127,7 @@ public class CallerRecoveryMatcherTests {
                     new Rva(currentCaller))
             });
 
-        public static CallerRecoveryContext StructuralCallerMatches(uint oldFirst, uint currentFirst, uint oldSecond, uint currentSecond) => new(
+        public static CallerRecoveryContext StructuralCallerMatches(uint oldFirst, uint currentFirst, uint oldSecond, uint currentSecond) => Context(
             4,
             new Dictionary<Rva, FunctionMatchResult> {
                 [new Rva(oldFirst)] = ExactMatch(currentFirst),
@@ -110,7 +135,7 @@ public class CallerRecoveryMatcherTests {
             },
             new Dictionary<Rva, SymbolAnalysis>());
 
-        public static CallerRecoveryContext NonUniqueStructuralCallerMatch(uint oldCaller, uint firstCurrent, uint secondCurrent) => new(
+        public static CallerRecoveryContext NonUniqueStructuralCallerMatch(uint oldCaller, uint firstCurrent, uint secondCurrent) => Context(
             4,
             new Dictionary<Rva, FunctionMatchResult> {
                 [new Rva(oldCaller)] = new FunctionMatchResult(
@@ -123,6 +148,40 @@ public class CallerRecoveryMatcherTests {
                     ])
             },
             new Dictionary<Rva, SymbolAnalysis>());
+
+        public static CallerRecoveryContext TrustedDispatchContext() => Context(
+            4,
+            new Dictionary<Rva, FunctionMatchResult> { [new Rva(0x1200)] = ExactMatch(0x2200) },
+            new Dictionary<Rva, SymbolAnalysis>(),
+            ImageWithDirectCall(0x1230, 0x1500),
+            ImageWithDirectCall(0x2230, 0x2800));
+
+        public static CallerRecoveryContext ContextWithRadius(int radius) => Context(
+            radius,
+            new Dictionary<Rva, FunctionMatchResult>(),
+            new Dictionary<Rva, SymbolAnalysis>());
+
+        private static CallerRecoveryContext Context(
+            int radius,
+            IReadOnlyDictionary<Rva, FunctionMatchResult> matches,
+            IReadOnlyDictionary<Rva, SymbolAnalysis> anchors,
+            PeImage? previousImage = null,
+            PeImage? currentImage = null) => new(
+            radius,
+            matches,
+            anchors,
+            previousImage ?? TestImages.WithExecutableBytes(new byte[0x4000]),
+            currentImage ?? TestImages.WithExecutableBytes(new byte[0x4000]),
+            new IcedInstructionDecoder());
+
+        private static PeImage ImageWithDirectCall(uint callSite, uint target) {
+            var bytes = new byte[0x4000];
+            var offset = checked((int)(callSite - 0x1000));
+            bytes[offset] = 0xE8;
+            BitConverter.GetBytes(checked((int)(target - (callSite + 5)))).CopyTo(bytes, offset + 1);
+            bytes[offset + 5] = 0xC3;
+            return TestImages.WithExecutableBytes(bytes);
+        }
 
         private static SymbolAnalysis Analysis(
             uint target,
@@ -177,9 +236,17 @@ public class CallerRecoveryMatcherTests {
             [new CallEdge(new Rva(0x2200), new Rva(0x2230), new Rva(firstTarget), CallEdgeKind.DirectCall),
              new CallEdge(new Rva(0x2300), new Rva(0x2330), new Rva(secondTarget), CallEdgeKind.DirectCall)]);
 
-        public static CallGraph DispatchBlockReachableOnlyFromTrustedCallSite(uint callSite) => OldIncomingCall(0x1200, callSite, 0x1500);
+        public static CallGraph DispatchBlockReachableOnlyFromTrustedCallSite(uint callSite) => Graph(
+            Function(0x1200, [Instruction(0x1200, "Ret", FlowControlKind.Return)]),
+            []);
 
-        public static CallGraph UniqueEquivalentDispatchBlock(uint callSite, uint target) => CurrentIncomingCall(0x2200, callSite, target);
+        public static CallGraph UniqueEquivalentDispatchBlock(uint callSite, uint target) => Graph(
+            Function(0x2200, [Instruction(0x2200, "Ret", FlowControlKind.Return)]),
+            []);
+
+        public static CallGraph IncomingCallWithImagePointer(uint caller, uint callSite, uint target, uint pointer) => Graph(
+            Function(caller, [ImagePointer(caller, pointer), Call(callSite, target), Instruction(callSite + 5, "Ret", FlowControlKind.Return)]),
+            [new CallEdge(new Rva(caller), new Rva(callSite), new Rva(target), CallEdgeKind.DirectCall)]);
 
         private static CallGraph Graph(FunctionGraph function, ImmutableArray<CallEdge> edges) => new([function], edges);
 
@@ -199,6 +266,15 @@ public class CallerRecoveryMatcherTests {
             new Rva(target),
             null,
             [new DecodedConstant(new ByteRange(1, 4), EncodedConstantKind.BranchDisplacement, 0)]);
+
+        private static DecodedInstruction ImagePointer(uint rva, uint pointer) => new(
+            new Rva(rva),
+            [0xB8, (byte)pointer, (byte)(pointer >> 8), (byte)(pointer >> 16), (byte)(pointer >> 24)],
+            "Mov_Register_Immediate",
+            FlowControlKind.Next,
+            null,
+            null,
+            [new DecodedConstant(new ByteRange(1, 4), EncodedConstantKind.Immediate, pointer)]);
 
         private static DecodedInstruction Instruction(uint rva, string opcodeKey, FlowControlKind flowControl) => new(
             new Rva(rva),

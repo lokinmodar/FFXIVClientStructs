@@ -11,6 +11,9 @@ public sealed record CallSiteFingerprint(
     string Sha256,
     ImmutableArray<string> OpcodeKeys,
     int InstructionCount) {
+    /// <summary>Defines the required count of decoded instructions on each side of a call-site.</summary>
+    public const int InstructionRadius = 4;
+
     /// <summary>Creates a normalized fingerprint for <paramref name="instructions"/>.</summary>
     /// <param name="instructions">The reachable instruction window containing a direct call.</param>
     /// <param name="imageSize">The image size used to identify RVA-valued immediate pointers, or zero when unavailable.</param>
@@ -36,7 +39,8 @@ public sealed record CallSiteFingerprint(
     /// <returns>A deterministic fingerprint for the bounded call-site window.</returns>
     public static CallSiteFingerprint Create(FunctionGraph function, Rva callSite, int instructionRadius, uint imageSize = 0) {
         ArgumentNullException.ThrowIfNull(function);
-        ArgumentOutOfRangeException.ThrowIfNegative(instructionRadius);
+        if (instructionRadius != InstructionRadius)
+            throw new ArgumentOutOfRangeException(nameof(instructionRadius), instructionRadius, "The call-site instruction radius must be exactly four.");
 
         var instructions = function.Instructions.OrderBy(instruction => instruction.Rva.Value).ToImmutableArray();
         var callIndex = instructions
