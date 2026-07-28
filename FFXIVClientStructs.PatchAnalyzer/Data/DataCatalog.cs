@@ -33,6 +33,7 @@ public sealed class DataCatalog {
         ArgumentNullException.ThrowIfNull(sourceText);
 
         var sourceMap = DataSourceMap.Scan(sourceText, previousImageBase);
+        var duplicateKeyMap = YamlDuplicateKeyMap.Scan(sourceText);
         try {
             using var reader = new StringReader(sourceText);
             var yaml = new YamlStream();
@@ -43,7 +44,7 @@ public sealed class DataCatalog {
             ValidateShape(root);
         } catch (YamlException exception) when (
             sourceMap.DuplicateClassNames.Count > 0 &&
-            !sourceMap.HasNonClassDuplicateKeys &&
+            duplicateKeyMap.HasOnlyDuplicateClassDeclarations &&
             exception.Message.StartsWith("Duplicate key ", StringComparison.Ordinal)) {
             // YamlDotNet rejects duplicate mapping keys before shape validation; preserve them for ambiguity reporting.
         }

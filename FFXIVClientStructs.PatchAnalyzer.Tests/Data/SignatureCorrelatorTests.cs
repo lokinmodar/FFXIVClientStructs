@@ -177,6 +177,36 @@ public class SignatureCorrelatorTests {
     }
 
     [Theory]
+    [InlineData("""
+                version: 1
+                globals: {}
+                functions: {}
+                classes:
+                  Client::Game::Thing:
+                    metadata: first
+                    metadata: second
+                  Client::Game::Thing:
+                    instances:
+                      - ea: 0x142000300
+                """)]
+    [InlineData("""
+                version: 1
+                globals: {}
+                functions: {}
+                classes:
+                  Client::Game::Thing:
+                    instances:
+                      - ea: 0x142000100
+                        ea: 0x142000200
+                  Client::Game::Thing:
+                    instances:
+                      - ea: 0x142000300
+                """)]
+    public void Parse_DuplicateClassAndUnrelatedNestedDuplicateKey_ThrowsYamlException(string yaml) {
+        Assert.Throws<YamlException>(() => DataCatalog.Parse(yaml, 0x140000000));
+    }
+
+    [Theory]
     [InlineData("version: []\nglobals: {}\nfunctions: {}\nclasses: {}\n")]
     [InlineData("version: 1\nglobals: []\nfunctions: {}\nclasses: {}\n")]
     [InlineData("version: 1\nglobals: {}\nfunctions: {}\nclasses:\n  Client::Game::Thing:\n    funcs: []\n")]

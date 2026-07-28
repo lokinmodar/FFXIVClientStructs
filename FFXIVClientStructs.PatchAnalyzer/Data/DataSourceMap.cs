@@ -10,29 +10,22 @@ internal sealed class DataSourceMap {
     private static readonly Regex Mapping = new(@"^(?<indent>\s*)(?<key>.+?)(?::(?=\s|$))\s*(?<value>.*?)\s*$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private static readonly Regex EntryAddress = new(@"^(?<indent>\s*)-\s+ea:\s*(?<address>0x[0-9A-Fa-f]+)", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-    private DataSourceMap(string version, SourceSpan versionSourceSpan, ImmutableArray<DataLocation> locations, ImmutableHashSet<string> duplicateClassNames, bool hasNonClassDuplicateKeys) {
+    private DataSourceMap(string version, SourceSpan versionSourceSpan, ImmutableArray<DataLocation> locations, ImmutableHashSet<string> duplicateClassNames) {
         Version = version;
         VersionSourceSpan = versionSourceSpan;
         Locations = locations;
         DuplicateClassNames = duplicateClassNames;
-        HasNonClassDuplicateKeys = hasNonClassDuplicateKeys;
     }
 
     public string Version { get; }
     public SourceSpan VersionSourceSpan { get; }
     public ImmutableArray<DataLocation> Locations { get; }
     public ImmutableHashSet<string> DuplicateClassNames { get; }
-    public bool HasNonClassDuplicateKeys { get; }
 
     public static DataSourceMap Scan(string sourceText, ulong imageBase) {
         var locations = ImmutableArray.CreateBuilder<DataLocation>();
         var classNames = new HashSet<string>(StringComparer.Ordinal);
         var duplicateClassNames = ImmutableHashSet.CreateBuilder<string>(StringComparer.Ordinal);
-        var rootKeys = new HashSet<string>(StringComparer.Ordinal);
-        var sectionKeys = new HashSet<string>(StringComparer.Ordinal);
-        var classMemberKeys = new HashSet<string>(StringComparer.Ordinal);
-        var classFunctionKeys = new HashSet<string>(StringComparer.Ordinal);
-        var hasNonClassDuplicateKeys = false;
         var rootIndent = -1;
         var section = string.Empty;
         var sectionContentIndent = -1;
@@ -67,11 +60,8 @@ internal sealed class DataSourceMap {
                     rootIndent = indent;
 
                 if (indent == rootIndent) {
-                    if (!rootKeys.Add(key))
-                        hasNonClassDuplicateKeys = true;
                     section = key;
                     sectionContentIndent = -1;
-                    sectionKeys.Clear();
                     className = string.Empty;
                     classIndent = -1;
                     classSection = string.Empty;
@@ -86,8 +76,6 @@ internal sealed class DataSourceMap {
                     if (sectionContentIndent < 0)
                         sectionContentIndent = indent;
                     if (indent == sectionContentIndent) {
-                        if (!sectionKeys.Add(key))
-                            hasNonClassDuplicateKeys = true;
                         AddLocation(locations, key, value, section == "globals" ? LocationKind.Global : LocationKind.Function, position, rawLine, imageBase);
                     }
                 } else if (section == "classes" && string.IsNullOrEmpty(value)) {
@@ -100,25 +88,18 @@ internal sealed class DataSourceMap {
                         classSection = string.Empty;
                         classSectionIndent = -1;
                         classContentIndent = -1;
-                        classMemberKeys.Clear();
-                        classFunctionKeys.Clear();
                     } else if (!string.IsNullOrEmpty(className) && (key == "funcs" || key == "instances" || key == "vtbls")) {
                         if (classSectionIndent < 0)
                             classSectionIndent = indent;
                         if (indent == classSectionIndent) {
-                            if (!classMemberKeys.Add(key))
-                                hasNonClassDuplicateKeys = true;
                             classSection = key;
                             classContentIndent = -1;
-                            classFunctionKeys.Clear();
                         }
                     }
                 } else if (section == "classes" && classSection == "funcs") {
                     if (classContentIndent < 0)
                         classContentIndent = indent;
                     if (indent == classContentIndent) {
-                        if (!classFunctionKeys.Add(key))
-                            hasNonClassDuplicateKeys = true;
                         AddLocation(locations, key, $"{className}::{value}", LocationKind.Function, position, rawLine, imageBase);
                     }
                 }
@@ -130,7 +111,7 @@ internal sealed class DataSourceMap {
                 position++;
         }
 
-        return new DataSourceMap(version, versionSpan, locations.ToImmutable(), duplicateClassNames.ToImmutable(), hasNonClassDuplicateKeys);
+        return new DataSourceMap(version, versionSpan, locations.ToImmutable(), duplicateClassNames.ToImmutable());
     }
 
     private static void AddLocation(
