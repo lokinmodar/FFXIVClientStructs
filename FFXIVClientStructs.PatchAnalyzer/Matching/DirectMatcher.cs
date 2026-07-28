@@ -41,7 +41,7 @@ public static class DirectMatcher {
         if (entry.CorrelationStatus == DataCorrelationStatus.Invalid)
             return (SymbolStatus.AnalysisError, null, entry.Diagnostic ?? "The signature cannot be correlated to data.yml.");
         if (entry.Location is null)
-            return (SymbolStatus.AnalysisError, null, "The matched data.yml entry has no mapped RVA.");
+            return (SymbolStatus.NotInData, null, "The matched data.yml entry has no mapped RVA.");
         if (previousScan.Truncated)
             return (SymbolStatus.AnalysisError, null, "Previous scan reached its match limit.");
         if (previousScan.Matches.Length != 1 || previousScan.Matches[0].ResolvedRva != entry.Location.Rva)

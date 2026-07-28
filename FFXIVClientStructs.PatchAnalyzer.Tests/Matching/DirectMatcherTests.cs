@@ -50,6 +50,18 @@ public class DirectMatcherTests {
     }
 
     [Fact]
+    public void Match_MatchedCorrelationWithoutLocation_ReturnsNotInData() {
+        var analysis = DirectMatcher.Match(
+            TestCatalog.Entry(DataCorrelationStatus.Matched, null),
+            TestScans.Result(new Rva(0x1000)),
+            TestScans.Result(new Rva(0x2000)));
+
+        Assert.Equal(SymbolStatus.NotInData, analysis.Status);
+        Assert.Null(analysis.CurrentTarget);
+        Assert.NotEmpty(analysis.Diagnostics);
+    }
+
+    [Fact]
     public void Match_TruncatedOldScan_RemainsNonDirectWithDiagnostic() {
         var analysis = DirectMatcher.Match(
             TestCatalog.Entry(DataCorrelationStatus.Matched, new Rva(0x1000)),
