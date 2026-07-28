@@ -86,6 +86,18 @@ public class CallerRecoveryMatcherTests {
     }
 
     [Fact]
+    public void Recover_TrustedTailJumpWithPadding_ReturnsUnsupported() {
+        var result = CallerRecoveryMatcher.Recover(
+            TestRecovery.MissingCallSiteSignature(0x1230, target: 0x1500),
+            TestGraphs.DispatchBlockReachableOnlyFromTrustedCallSite(0x1230),
+            TestGraphs.UniqueEquivalentDispatchBlock(0x2230, target: 0x2800),
+            TestRecovery.TrustedJumpContext());
+
+        Assert.Equal(SymbolStatus.Unsupported, result.Status);
+        Assert.Null(result.CurrentTarget);
+    }
+
+    [Fact]
     public void Recover_NormalizesImageRangeImmediatePointers() {
         var result = CallerRecoveryMatcher.Recover(
             TestRecovery.MissingDirectTarget(0x1500),
@@ -179,6 +191,13 @@ public class CallerRecoveryMatcherTests {
             ImageWithDirectCall(0x1230, 0x1500, previousHasFullWindow),
             ImageWithDirectCall(0x2230, 0x2800, hasFullWindow: true));
 
+        public static CallerRecoveryContext TrustedJumpContext() => Context(
+            4,
+            new Dictionary<Rva, FunctionMatchResult> { [new Rva(0x1200)] = ExactMatch(0x2200) },
+            new Dictionary<Rva, SymbolAnalysis>(),
+            ImageWithDirectJump(0x1230, 0x1500),
+            ImageWithDirectJump(0x2230, 0x2800));
+
         public static CallerRecoveryContext ContextWithRadius(int radius) => Context(
             radius,
             new Dictionary<Rva, FunctionMatchResult>(),
@@ -208,6 +227,16 @@ public class CallerRecoveryMatcherTests {
                 Array.Fill(bytes, (byte)0x90, offset + 5, CallSiteFingerprint.InstructionRadius);
             else
                 bytes[offset + 5] = 0xC3;
+            return TestImages.WithExecutableBytes(bytes);
+        }
+
+        private static PeImage ImageWithDirectJump(uint callSite, uint target) {
+            var bytes = new byte[0x4000];
+            var offset = checked((int)(callSite - 0x1000));
+            Array.Fill(bytes, (byte)0x90, offset - CallSiteFingerprint.InstructionRadius, CallSiteFingerprint.InstructionRadius);
+            bytes[offset] = 0xE9;
+            BitConverter.GetBytes(checked((int)(target - (callSite + 5)))).CopyTo(bytes, offset + 1);
+            Array.Fill(bytes, (byte)0x90, offset + 5, CallSiteFingerprint.InstructionRadius);
             return TestImages.WithExecutableBytes(bytes);
         }
 

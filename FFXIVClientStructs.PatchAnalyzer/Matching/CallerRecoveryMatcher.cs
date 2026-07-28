@@ -310,7 +310,7 @@ public static class CallerRecoveryMatcher {
         RuntimeFunctionRange range,
         Rva callSite,
         out ImmutableArray<DecodedInstruction> instructions) {
-        if (!TryDecodeInstruction(image, decoder, range, callSite, out var call) || !IsDirectOpcode(call)) {
+        if (!TryDecodeInstruction(image, decoder, range, callSite, out var call) || !IsTrustedCallOpcode(call)) {
             instructions = [];
             return false;
         }
@@ -408,6 +408,11 @@ public static class CallerRecoveryMatcher {
     private static bool IsDirectOpcode(DecodedInstruction instruction) =>
         instruction.Bytes[0] is 0xE8 or 0xE9 &&
         instruction.FlowControl is FlowControlKind.DirectCall or FlowControlKind.DirectBranch &&
+        instruction.NearBranchTarget is not null;
+
+    private static bool IsTrustedCallOpcode(DecodedInstruction instruction) =>
+        instruction.Bytes[0] == 0xE8 &&
+        instruction.FlowControl == FlowControlKind.DirectCall &&
         instruction.NearBranchTarget is not null;
 
     private static SymbolAnalysis With(
