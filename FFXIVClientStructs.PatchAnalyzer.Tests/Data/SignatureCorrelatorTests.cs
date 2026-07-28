@@ -128,6 +128,34 @@ public class SignatureCorrelatorTests {
         Assert.Equal(new Rva(0x2000300), entries[1].Location!.Rva);
     }
 
+    [Fact]
+    public void Correlate_DuplicateClassDeclarations_ReturnsAmbiguousForInstanceAndVirtualTable() {
+        const string yaml = """
+                            version: 1
+                            globals: {}
+                            functions: {}
+                            classes:
+                              Client::Game::Thing:
+                                instances:
+                                  - ea: 0x142000100
+                                vtbls:
+                                  - ea: 0x142000200
+                              Client::Game::Thing:
+                                instances:
+                                  - ea: 0x142000300
+                                vtbls:
+                                  - ea: 0x142000400
+                            """;
+
+        var entries = SignatureCorrelator.Correlate([
+            SignatureDefinition.Parse("FFXIVClientStructs.FFXIV.Client.Game.Thing.Instance", "48 8B", []),
+            SignatureDefinition.Parse("FFXIVClientStructs.FFXIV.Client.Game.Thing.StaticVirtualTable", "48 8D", [])
+        ], DataCatalog.Parse(yaml, 0x140000000));
+
+        Assert.All(entries, entry => Assert.Equal(DataCorrelationStatus.Ambiguous, entry.CorrelationStatus));
+        Assert.All(entries, entry => Assert.Null(entry.Location));
+    }
+
     [Theory]
     [InlineData("version: []\nglobals: {}\nfunctions: {}\nclasses: {}\n")]
     [InlineData("version: 1\nglobals: []\nfunctions: {}\nclasses: {}\n")]

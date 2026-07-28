@@ -10,18 +10,22 @@ internal sealed class DataSourceMap {
     private static readonly Regex Mapping = new(@"^(?<indent>\s*)(?<key>.+?)(?::(?=\s|$))\s*(?<value>.*?)\s*$", RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private static readonly Regex EntryAddress = new(@"^(?<indent>\s*)-\s+ea:\s*(?<address>0x[0-9A-Fa-f]+)", RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
-    private DataSourceMap(string version, SourceSpan versionSourceSpan, ImmutableArray<DataLocation> locations) {
+    private DataSourceMap(string version, SourceSpan versionSourceSpan, ImmutableArray<DataLocation> locations, ImmutableHashSet<string> duplicateClassNames) {
         Version = version;
         VersionSourceSpan = versionSourceSpan;
         Locations = locations;
+        DuplicateClassNames = duplicateClassNames;
     }
 
     public string Version { get; }
     public SourceSpan VersionSourceSpan { get; }
     public ImmutableArray<DataLocation> Locations { get; }
+    public ImmutableHashSet<string> DuplicateClassNames { get; }
 
     public static DataSourceMap Scan(string sourceText, ulong imageBase) {
         var locations = ImmutableArray.CreateBuilder<DataLocation>();
+        var classNames = new HashSet<string>(StringComparer.Ordinal);
+        var duplicateClassNames = ImmutableHashSet.CreateBuilder<string>(StringComparer.Ordinal);
         var rootIndent = -1;
         var section = string.Empty;
         var sectionContentIndent = -1;
@@ -77,6 +81,8 @@ internal sealed class DataSourceMap {
                     if (classIndent < 0)
                         classIndent = indent;
                     if (indent == classIndent) {
+                        if (!classNames.Add(key))
+                            duplicateClassNames.Add(key);
                         className = key;
                         classSection = string.Empty;
                         classSectionIndent = -1;
@@ -103,7 +109,7 @@ internal sealed class DataSourceMap {
                 position++;
         }
 
-        return new DataSourceMap(version, versionSpan, locations.ToImmutable());
+        return new DataSourceMap(version, versionSpan, locations.ToImmutable(), duplicateClassNames.ToImmutable());
     }
 
     private static void AddLocation(

@@ -1,5 +1,6 @@
 using System.Collections.Immutable;
 using FFXIVClientStructs.PatchAnalyzer.Binary;
+using YamlDotNet.Core;
 using YamlDotNet.RepresentationModel;
 
 namespace FFXIVClientStructs.PatchAnalyzer.Data;
@@ -14,31 +15,39 @@ public sealed record DataLocation(
     SourceSpan SourceSpan);
 
 public sealed class DataCatalog {
-    private DataCatalog(string sourceText, string version, SourceSpan versionSourceSpan, ImmutableArray<DataLocation> locations) {
+    private DataCatalog(string sourceText, string version, SourceSpan versionSourceSpan, ImmutableArray<DataLocation> locations, ImmutableHashSet<string> duplicateClassNames) {
         SourceText = sourceText;
         Version = version;
         VersionSourceSpan = versionSourceSpan;
         Locations = locations;
+        DuplicateClassNames = duplicateClassNames;
     }
 
     public string SourceText { get; }
     public string Version { get; }
     public SourceSpan VersionSourceSpan { get; }
     public ImmutableArray<DataLocation> Locations { get; }
+    internal ImmutableHashSet<string> DuplicateClassNames { get; }
 
     public static DataCatalog Parse(string sourceText, ulong previousImageBase) {
         ArgumentNullException.ThrowIfNull(sourceText);
 
-        using var reader = new StringReader(sourceText);
-        var yaml = new YamlStream();
-        yaml.Load(reader);
-        if (yaml.Documents.Count != 1 || yaml.Documents[0].RootNode is not YamlMappingNode root)
-            throw new FormatException("data.yml must contain one mapping document.");
-
-        ValidateShape(root);
-
         var sourceMap = DataSourceMap.Scan(sourceText, previousImageBase);
-        return new DataCatalog(sourceText, sourceMap.Version, sourceMap.VersionSourceSpan, sourceMap.Locations);
+        try {
+            using var reader = new StringReader(sourceText);
+            var yaml = new YamlStream();
+            yaml.Load(reader);
+            if (yaml.Documents.Count != 1 || yaml.Documents[0].RootNode is not YamlMappingNode root)
+                throw new FormatException("data.yml must contain one mapping document.");
+
+            ValidateShape(root);
+        } catch (YamlException exception) when (
+            sourceMap.DuplicateClassNames.Count > 0 &&
+            exception.Message.StartsWith("Duplicate key ", StringComparison.Ordinal)) {
+            // YamlDotNet rejects duplicate mapping keys before shape validation; preserve them for ambiguity reporting.
+        }
+
+        return new DataCatalog(sourceText, sourceMap.Version, sourceMap.VersionSourceSpan, sourceMap.Locations, sourceMap.DuplicateClassNames);
     }
 
     private static void ValidateShape(YamlMappingNode root) {
