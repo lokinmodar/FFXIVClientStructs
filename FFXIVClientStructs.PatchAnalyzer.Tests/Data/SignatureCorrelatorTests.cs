@@ -27,14 +27,16 @@ public class SignatureCorrelatorTests {
         };
 
         var entries = SignatureCorrelator.Correlate(definitions, catalog);
+        var ctorLocation = Assert.IsType<DataLocation>(entries[0].Location);
+        var instanceLocation = Assert.IsType<DataLocation>(entries[1].Location);
 
-        Assert.Equal(new Rva(0x1020), entries[0].Location!.Rva);
+        Assert.Equal(new Rva(0x1020), ctorLocation.Rva);
         Assert.Equal(
             "0x140001020",
             yaml.AsSpan(
-                entries[0].Location.SourceSpan.Start,
-                entries[0].Location.SourceSpan.Length).ToString());
-        Assert.Equal(new Rva(0x2000100), entries[1].Location!.Rva);
+                ctorLocation.SourceSpan.Start,
+                ctorLocation.SourceSpan.Length).ToString());
+        Assert.Equal(new Rva(0x2000100), instanceLocation.Rva);
     }
 
     [Fact]
@@ -53,11 +55,13 @@ public class SignatureCorrelatorTests {
             SignatureDefinition.Parse("FFXIVClientStructs.FFXIV.Client.Game.Thing.StaticVirtualTable", "48 8D", []),
             SignatureDefinition.Parse("FFXIVClientStructs.FFXIV.Client.Game.Thing.Value", "48 89", [])
         ], DataCatalog.Parse(yaml, 0x140000000));
+        var virtualTableLocation = Assert.IsType<DataLocation>(entries[0].Location);
+        var globalLocation = Assert.IsType<DataLocation>(entries[1].Location);
 
-        Assert.Equal(LocationKind.VirtualTable, entries[0].Location!.Kind);
-        Assert.Equal(new Rva(0x2000100), entries[0].Location.Rva);
-        Assert.Equal(LocationKind.Global, entries[1].Location!.Kind);
-        Assert.Equal(new Rva(0x2000010), entries[1].Location.Rva);
+        Assert.Equal(LocationKind.VirtualTable, virtualTableLocation.Kind);
+        Assert.Equal(new Rva(0x2000100), virtualTableLocation.Rva);
+        Assert.Equal(LocationKind.Global, globalLocation.Kind);
+        Assert.Equal(new Rva(0x2000010), globalLocation.Rva);
     }
 
     [Fact]
@@ -98,10 +102,11 @@ public class SignatureCorrelatorTests {
         var entry = Assert.Single(SignatureCorrelator.Correlate([
             SignatureDefinition.Parse("FFXIVClientStructs.FFXIV.Client.Game.Thing.Update", "40 55", [])
         ], DataCatalog.Parse(yaml, 0x140000000)));
+        var location = Assert.IsType<DataLocation>(entry.Location);
 
         Assert.Equal(
             "0x140001000",
-            yaml.AsSpan(entry.Location!.SourceSpan.Start, entry.Location.SourceSpan.Length).ToString());
+            yaml.AsSpan(location.SourceSpan.Start, location.SourceSpan.Length).ToString());
     }
 
     [Fact]
